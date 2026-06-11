@@ -1,0 +1,12 @@
+[project]
+name = "deep-learning-bonus-project-group-16"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "streamlit>=1.30.0",
+    "plotly>=5.18.0",
+]

@@ -1,85 +1,98 @@
-# Student Instructions
+# Deep Learning Bonus Project - Group 16
 
-This project is about multivariate time series forecasting with deep learning.
+This repository contains the codebase for the Deep Learning Bonus Project by Group 16. The project uses `uv` for python environment and dependency management.
 
-## Important Links
+---
 
-- Dataset: https://huggingface.co/datasets/AIML-TUDA/dlam-ts-project-data-2026
-- Hugging Face leaderboard Space: https://aiml-tuda-dlam-ts-project-leaderboard-2026.hf.space/
-- Moodle submission page: https://moodle.informatik.tu-darmstadt.de/course/view.php?id=2011
-- Report template: `student/report_template/`
-- Code template: `student/submission_template/`
-- Baseline examples: `student/baseline/`
-- Deadline: 04.09.2026
+## WSL (Windows Subsystem for Linux) Setup Guide
 
-Leaderboard metrics: MAE, MSE, RMSE, MAPE, sMAPE, and WAPE. Lower is better for all metrics.
+Follow the steps below in your WSL terminal to configure the environment and download the dataset.
 
-Target: predict the future hourly operational load index for each `series_id`. Higher values mean more operational pressure in that unit.
+### Prerequisites
 
-## What You Need To Submit
-
-Submit the following:
-
-- Final report PDF.
-- Reproducible code repository or archive.
-- Final model archive `final_submission.zip` through the Hugging Face leaderboard Space.
-
-## Public Validation Leaderboard
-
-You may upload validation predictions to the Hugging Face Space. The Space scores your CSV automatically against hidden validation labels and updates the public validation leaderboard.
-
-Before uploading, register your group in the Space and list every group member's Hugging Face username. Any listed member can submit revisions for the same group.
-
-Before registration, submission tabs are hidden. After registration, the Space uses your Hugging Face login to select the group automatically, and the group tab changes to `Manage Group`. You do not type the group ID again. If the registration is wrong, ask an instructor to correct it.
-
-Each validation upload also asks for a model name. Use a short technical name such as `XY_features_v1` or `ZZZ_ablation_2`. Reusing the same model name creates a new revision for that model; using a different model name creates another leaderboard row for your group. Do not add the model name as a CSV column.
-
-The student dataset contains `train.csv`, `validation_input.csv`, `forecast_index_validation.csv`, and `metadata.json`. It does not contain validation targets, test inputs, or test targets.
-
-Before building your model, you can generate simple baseline prediction files from `student/baseline/`.
-
-Required prediction format:
-
-```csv
-series_id,timestamp,prediction
+Ensure you have `uv` installed in WSL. If not, install it via:
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Your validation prediction file must contain one row for every row in `forecast_index_validation.csv`. The 24-hour forecast horizon is the recommended rollout block length, not the total number of rows to submit. The validation and private test indices each contain 336 hourly timestamps per series, so a 24-step model must be rolled forward until all required rows are filled.
+### 1. Synchronize Dependencies
 
-## Final Model Submission
-
-Final test data is private. You do not receive test labels or private test inputs. Instead, you submit a runnable model archive. During private evaluation, your script receives a private input directory containing `test_input.csv`, `forecast_index_test.csv`, and `metadata.json`.
-
-Your `final_submission.zip` must contain:
-
-```text
-predict.py
-requirements.txt
-checkpoint.pt
-src/  # optional
+Run `uv sync` to configure the virtual environment and install required libraries:
+```bash
+uv sync
 ```
 
-During private evaluation, instructors run:
+### 2. Activate the Virtual Environment
+
+Activate the virtual environment:
+```bash
+source .venv/bin/activate
+```
+
+### 3. Download the Dataset
+
+Download the dataset `AIML-TUDA/dlam-ts-project-data-2026` from Hugging Face into `res/dataset/`:
+```bash
+uv run --with huggingface_hub src/download_data.py
+```
+
+---
+
+## Local Evaluation Pipeline (Recommended)
+
+To automate the entire local training split, baseline generation, metrics pre-computation, and dashboard visualization in a single run:
 
 ```bash
-python predict.py --input_dir /data/input --output_file /output/predictions.csv --checkpoint /submission/checkpoint.pt
+uv run python src/run_local_pipeline.py
 ```
 
-Your script must write the prediction CSV to the requested output path.
+This pipeline automatically handles the following sequence:
+1. Splits `train.csv` to hold out the last 336 steps of each series for local validation.
+2. Runs the baseline forecasts on the local training split.
+3. Precomputes and writes model-specific metrics (e.g. `output/local_baselines/seasonal_mean_metrics.json`).
+4. Launches the Streamlit evaluation dashboard.
 
-When uploading the final archive, use the same model name as the validation row that corresponds to the submitted checkpoint.
+---
 
-The baseline examples in `student/baseline/` show simple ways to produce valid prediction CSVs. Your final model should replace these baselines with your own PyTorch forecasting method.
+## Running Individual Steps
 
-## Reproducibility Requirements
+If you want to run the pipeline steps individually or customize the arguments:
 
-- Use PyTorch for the model.
-- Document training and inference steps in your README.
-- Fix random seeds where reasonable.
-- State all important hyperparameters.
-- Include each group member's contribution in the report.
-- Do not depend on internet access during final inference.
+### A. Split Training Data
+Create a local hold-out validation set (last 336 hours per series) from `train.csv`:
+```bash
+uv run python src/split_data.py
+```
+This generates `local_train.csv`, `local_validation_input.csv`, `local_validation_targets.csv`, and `local_forecast_index_validation.csv` inside `res/dataset/`.
 
-## Report
+### B. Run Baseline Forecasts
 
-The report should be 4--6 pages excluding references and cover introduction, related work, method, experiments, and conclusion.
+#### On the Global Validation Index (for Hugging Face Leaderboard submission):
+```bash
+uv run res/provided_res/baseline/run_baselines.py \
+  --train res/dataset/train.csv \
+  --forecast-index res/dataset/forecast_index_validation.csv \
+  --output-dir output/provided_baselines
+```
+
+#### On the Local Validation Split (for local backtesting):
+```bash
+uv run res/provided_res/baseline/run_baselines.py \
+  --train res/dataset/local_train.csv \
+  --forecast-index res/dataset/local_forecast_index_validation.csv \
+  --output-dir output/local_baselines
+```
+
+### C. Precompute Performance Metrics
+Compute model accuracy metrics (MAE, RMSE, sMAPE, WAPE, and improvement vs. naive baseline) across all units and steps:
+```bash
+uv run python src/evaluate_predictions.py
+```
+This scans `output/` recursively for prediction files and saves individual `[model]_metrics.json` summaries in each model's respective folder.
+
+### D. Launch the Streamlit Dashboard
+Launch the interface to compare configurations, WAPE improvement, error distribution, and rollout drift:
+```bash
+uv run python dashboard.py
+```
+*(Alternatively, run `uv run streamlit run src/dashboard.py`)*
