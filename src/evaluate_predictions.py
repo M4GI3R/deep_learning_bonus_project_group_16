@@ -20,6 +20,29 @@ def calculate_metrics(y_true, y_pred):
         "WAPE": wape
     }
 
+def validate_prediction_contract(gt_df, pred_df, pred_col, display_name):
+    """Reject incomplete or ambiguous forecasts before calculating metrics."""
+    keys = ["series_id", "timestamp"]
+    if gt_df.duplicated(keys).any():
+        raise ValueError("ground truth contains duplicate (series_id, timestamp) rows")
+    if pred_df.duplicated(keys).any():
+        raise ValueError("predictions contain duplicate (series_id, timestamp) rows")
+    if not pd.api.types.is_numeric_dtype(pred_df[pred_col]):
+        raise ValueError(f"{pred_col!r} must be numeric")
+    if not np.isfinite(pred_df[pred_col].to_numpy()).all():
+        raise ValueError(f"{pred_col!r} contains missing or non-finite values")
+
+    expected = pd.MultiIndex.from_frame(gt_df[keys])
+    actual = pd.MultiIndex.from_frame(pred_df[keys])
+    missing = expected.difference(actual)
+    extra = actual.difference(expected)
+    if len(missing) or len(extra) or len(pred_df) != len(gt_df):
+        raise ValueError(
+            f"prediction coverage mismatch for {display_name}: "
+            f"expected={len(gt_df)}, actual={len(pred_df)}, "
+            f"missing={len(missing)}, extra={len(extra)}"
+        )
+
 def main():
     # Resolve paths
     script_dir = Path(__file__).resolve().parent
@@ -101,6 +124,8 @@ def main():
             # Align predictions with ground truth
             # Supporting prediction column named "prediction" or "target"
             pred_col = "prediction" if "prediction" in pred_df.columns else "target"
+
+            validate_prediction_contract(gt_df, pred_df, pred_col, pred["display_name"])
             
             aligned = pd.merge(gt_df, pred_df, on=["series_id", "timestamp"], how="inner")
             

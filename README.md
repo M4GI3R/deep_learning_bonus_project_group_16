@@ -96,3 +96,42 @@ Launch the interface to compare configurations, WAPE improvement, error distribu
 uv run python dashboard.py
 ```
 *(Alternatively, run `uv run streamlit run src/dashboard.py`)*
+
+---
+
+## Sprint 1: DLinear
+
+Train the small DLinear proof model on the local split:
+
+```bash
+uv run python src/train.py
+```
+
+Evaluate it through the same minimal inference package used for submission:
+
+```bash
+uv run python src/generate_predictions.py \
+  --history res/dataset/local_train.csv \
+  --forecast-index res/dataset/local_forecast_index_validation.csv \
+  --output output/local_dlinear/predictions.csv \
+  --checkpoint submission/checkpoint.pt
+```
+
+For the public Hugging Face validation run, train on all known targets and use
+the provided validation input/index:
+
+```bash
+uv run python src/train.py \
+  --train res/dataset/train.csv \
+  --checkpoint submission/checkpoint.pt
+
+uv run python submission/predict.py \
+  --input_dir res/dataset \
+  --output_file output/dlinear_validation.csv \
+  --checkpoint submission/checkpoint.pt
+```
+
+`src/` and the dashboard are development-only. The independent `submission/`
+directory is the slim offline artifact: it contains only inference code,
+requirements, and the generated checkpoint. Run the heavy training and upload
+the resulting validation CSV from the GPU environment.
