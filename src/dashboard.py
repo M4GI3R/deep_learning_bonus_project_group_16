@@ -77,7 +77,7 @@ if not metrics_data:
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("<div class='header-style' style='font-size: 20px;'>Matrix Selection</div>", unsafe_allow_html=True)
-    st.caption("Select models across domains to construct the matrix comparison.")
+    st.caption("Select models to include in the visual comparisons below.")
     
     # Group runs by category
     grouped_models = {}
@@ -106,28 +106,52 @@ if not selected_models:
 # ---------------------------------------------------------------------------
 st.markdown("<div class='section-title'>Operations Leaderboard Matrix</div>", unsafe_allow_html=True)
 
+# The leaderboard always contains every evaluated model.  The sidebar only
+# controls the visual comparisons, so reference baselines such as
+# ``seasonal_mean`` cannot disappear from the table.
+leaderboard_models = sorted(
+    metrics_data,
+    key=lambda display_name: metrics_data[display_name]["global_metrics"]["MAE"],
+)
+
+# ``naive_last_value`` is the sole reference baseline, irrespective of its
+# output category.  This keeps all models comparable to the same benchmark.
+baseline_name = next(
+    (
+        display_name
+        for display_name, model_info in metrics_data.items()
+        if model_info["name"] == "naive_last_value"
+    ),
+    None,
+)
+baseline_wape = (
+    metrics_data[baseline_name]["global_metrics"]["WAPE"]
+    if baseline_name is not None
+    else None
+)
+
 # Construct table rows
 html_table = "<div class='se-table-container'><table class='se-table'>"
 html_table += "<thead><tr>"
+html_table += "<th>Rank</th>"
 html_table += "<th>Category</th>"
 html_table += "<th>Model Name</th>"
 html_table += "<th>MAE</th>"
 html_table += "<th>RMSE</th>"
 html_table += "<th>sMAPE (%)</th>"
 html_table += "<th>WAPE</th>"
-html_table += "<th>WAPE Improvement (%)</th>"
+html_table += "<th>WAPE Improvement vs Naive (%)</th>"
 html_table += "</tr></thead><tbody>"
 
-# Find overall best model (minimum WAPE) among selected
-best_wape = float('inf')
-best_model_name = ""
-for d_name in selected_models:
-    wape = metrics_data[d_name]["global_metrics"]["WAPE"]
-    if wape < best_wape:
-        best_wape = wape
-        best_model_name = d_name
+# Highlight the minimum value in every error-metric column.  Ties are all
+# highlighted, rather than selecting an arbitrary single winner.
+metric_columns = ("MAE", "RMSE", "sMAPE (%)", "WAPE")
+best_metric_values = {
+    metric: min(metrics_data[d_name]["global_metrics"][metric] for d_name in leaderboard_models)
+    for metric in metric_columns
+}
 
-for d_name in selected_models:
+for rank, d_name in enumerate(leaderboard_models, start=1):
     m_info = metrics_data[d_name]
     metrics = m_info["global_metrics"]
     
@@ -137,27 +161,35 @@ for d_name in selected_models:
     rmse = metrics["RMSE"]
     smape = metrics["sMAPE (%)"]
     wape = metrics["WAPE"]
-    improvement = metrics.get("WAPE Improvement (%)", None)
-    
-    # Check if this row is the best model
-    row_style = ""
-    if d_name == best_model_name:
-        row_style = "style='background-color: rgba(0, 173, 181, 0.1); font-weight: bold;'"
+    is_baseline = m_info["name"] == "naive_last_value"
+    improvement = None
+    if baseline_wape is not None and baseline_wape > 0:
+        improvement = (baseline_wape - wape) / baseline_wape * 100
+
+    # Only the naïve last-value reference receives whole-row highlighting.
+    row_style = (
+        "style='background-color: rgba(241, 196, 15, 0.14); font-weight: bold;'"
+        if is_baseline
+        else ""
+    )
         
     html_table += f"<tr {row_style}>"
+    html_table += f"<td>{rank}</td>"
     html_table += f"<td style='color:#00ADB5;'><i>{cat}</i></td>"
     html_table += f"<td><b>{name}</b></td>"
-    html_table += f"<td>{mae:.4f}</td>"
-    html_table += f"<td>{rmse:.4f}</td>"
-    html_table += f"<td>{smape:.2f}%</td>"
-    
-    # Highlight WAPE cell if it's the best model
-    wape_highlight = "style='color: #00ADB5;'" if d_name == best_model_name else ""
-    html_table += f"<td {wape_highlight}>{wape:.4f}</td>"
-    
-    # Color WAPE Improvement
-    if improvement is None:
-        imp_html = "<span style='color: #888888;'>Baseline (Naive)</span>"
+    mae_style = "style='color: #2ECC71; font-weight: 700;'" if np.isclose(mae, best_metric_values["MAE"]) else ""
+    rmse_style = "style='color: #2ECC71; font-weight: 700;'" if np.isclose(rmse, best_metric_values["RMSE"]) else ""
+    smape_style = "style='color: #2ECC71; font-weight: 700;'" if np.isclose(smape, best_metric_values["sMAPE (%)"]) else ""
+    wape_style = "style='color: #2ECC71; font-weight: 700;'" if np.isclose(wape, best_metric_values["WAPE"]) else ""
+    html_table += f"<td {mae_style}>{mae:.4f}</td>"
+    html_table += f"<td {rmse_style}>{rmse:.4f}</td>"
+    html_table += f"<td {smape_style}>{smape:.2f}%</td>"
+    html_table += f"<td {wape_style}>{wape:.4f}</td>"
+
+    if is_baseline:
+        imp_html = "<span style='color: #F1C40F;'>Baseline (Naive)</span>"
+    elif improvement is None:
+        imp_html = "<span style='color: #888888;'>Unavailable</span>"
     elif improvement > 0:
         imp_html = f"<span style='color: #2ECC71;'>+{improvement:.2f}%</span>"
     elif improvement < 0:

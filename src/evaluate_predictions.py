@@ -140,17 +140,23 @@ def main():
         except Exception as e:
             print(f"Error evaluating {pred['display_name']}: {e}")
             
-    # 2. Second Pass: Calculate WAPE Improvement and save individual JSON files
+    # 2. Second Pass: Calculate WAPE improvement against the single
+    # naive-last-value reference and save individual JSON files.
+    baseline_result = next(
+        (res for res in results.values() if res["name"] == "naive_last_value"),
+        None,
+    )
+    baseline_wape = (
+        baseline_result["global_metrics"]["WAPE"]
+        if baseline_result is not None
+        else None
+    )
+
     for d_name, res in results.items():
-        cat = res["category"]
-        naive_key = f"{cat} / naive_last_value" if cat != "Root" else "naive_last_value"
-        
         improvement = None
-        if naive_key in results:
-            naive_wape = results[naive_key]["global_metrics"]["WAPE"]
+        if baseline_wape is not None and baseline_wape > 0:
             model_wape = res["global_metrics"]["WAPE"]
-            if naive_wape > 0:
-                improvement = float((naive_wape - model_wape) / naive_wape * 100)
+            improvement = float((baseline_wape - model_wape) / baseline_wape * 100)
                 
         res["global_metrics"]["WAPE Improvement (%)"] = improvement
         
