@@ -12,6 +12,16 @@ import torch
 from src.model import build_model
 
 
+def calendar_features(timestamps: list | pd.Series) -> torch.Tensor:
+    timestamps = pd.Series(pd.to_datetime(timestamps))
+    hour_angle = 2 * np.pi * timestamps.dt.hour.to_numpy() / 24
+    week_angle = 2 * np.pi * timestamps.dt.dayofweek.to_numpy() / 7
+    values = np.stack(
+        [np.sin(hour_angle), np.cos(hour_angle), np.sin(week_angle), np.cos(week_angle)], axis=1
+    ).astype(np.float32)
+    return torch.from_numpy(values)
+
+
 def load_history(input_dir: Path) -> pd.DataFrame:
     for name in ("test_input.csv", "validation_input.csv", "train.csv"):
         path = input_dir / name
@@ -42,16 +52,35 @@ def forecast(history: pd.DataFrame, forecast_index: pd.DataFrame, checkpoint: di
     with torch.no_grad():
         for series_id, requested in forecast_index.groupby("series_id", sort=False):
             requested = requested.sort_values("timestamp")
-            values = history.loc[history["series_id"].eq(series_id)].sort_values("timestamp")["target"].to_numpy(float)
+            series_history = history.loc[history["series_id"].eq(series_id)].sort_values("timestamp")
+            values = series_history["target"].to_numpy(float)
             if len(values) < context_length:
                 raise ValueError(f"Series {series_id!r} has {len(values)} history rows; {context_length} required")
             mean, scale = statistics[str(series_id)]
             normalized = list((values - mean) / scale)
+            history_times = pd.to_datetime(series_history["timestamp"]).tolist()
+            requested_times = pd.to_datetime(requested["timestamp"]).tolist()
             predictions = []
             while len(predictions) < len(requested):
+                offset = len(predictions)
+                block_times = requested_times[offset:offset + config["prediction_length"]]
+                while len(block_times) < config["prediction_length"]:
+                    block_times.append(block_times[-1] + pd.Timedelta(hours=1))
                 x = torch.tensor(normalized[-context_length:], dtype=torch.float32).unsqueeze(0)
-                block = model(x).squeeze(0).numpy()
+                model_inputs = {}
+                if config.get("use_calendar"):
+                    model_inputs["history_calendar"] = calendar_features(
+                        history_times[-context_length:]
+                    ).unsqueeze(0)
+                    model_inputs["future_calendar"] = calendar_features(block_times).unsqueeze(0)
+                if config.get("use_series_embedding"):
+                    mapping = checkpoint["series_mapping"]
+                    if str(series_id) not in mapping:
+                        raise ValueError(f"Series {series_id!r} was not present during training")
+                    model_inputs["series_index"] = torch.tensor([mapping[str(series_id)]])
+                block = model(x, **model_inputs).squeeze(0).numpy()
                 normalized.extend(block.tolist())
+                history_times.extend(block_times)
                 predictions.extend((block * scale + mean).tolist())
             result = requested[["series_id", "timestamp"]].copy()
             result["prediction"] = predictions[:len(result)]

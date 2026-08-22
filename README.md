@@ -104,7 +104,7 @@ uv run python dashboard.py
 Train the small DLinear proof model on the local split:
 
 ```bash
-uv run python src/train.py
+uv run python src/train.py --model dlinear
 ```
 
 Evaluate it through the same minimal inference package used for submission:
@@ -123,6 +123,7 @@ the provided validation input/index:
 ```bash
 uv run python src/train.py \
   --train res/dataset/train.csv \
+  --model dlinear \
   --checkpoint submission/checkpoint.pt
 
 uv run python submission/predict.py \
@@ -135,3 +136,33 @@ uv run python submission/predict.py \
 directory is the slim offline artifact: it contains only inference code,
 requirements, and the generated checkpoint. Run the heavy training and upload
 the resulting validation CSV from the GPU environment.
+
+## Sprint 2: TCN
+
+The default model is a compact global TCN with daily residual prediction,
+hour/day calendar features, and learned series embeddings:
+
+```bash
+uv run python src/train.py --model tcn
+```
+
+Generate and evaluate local predictions with the same commands shown above.
+Once the run is sound, retrain on `res/dataset/train.csv` and invoke
+`submission/predict.py` to create the Hugging Face validation CSV.
+
+The promising adaptations are already switchable without adding model variants:
+
+```bash
+# Pure target-history TCN
+uv run python src/train.py --model tcn \
+  --no-calendar --no-series-embedding --residual-period 0
+
+# Weekly instead of daily seasonal residual
+uv run python src/train.py --model tcn --residual-period 168
+
+# Wider model, only if the default underfits
+uv run python src/train.py --model tcn --channels 64
+```
+
+Keep the default configuration for the first online TCN run so calendar and
+unit-specific information are available. Change one switch at a time afterward.
