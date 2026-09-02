@@ -1,0 +1,118 @@
+"""Dataset schema, preprocessing, and sliding training windows."""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import Dataset
+
+FEATURE_COLUMNS = [
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "is_weekend",
+    "trend",
+    "workload_intensity",
+    "demand_forecast",
+    "staffing_forecast",
+    "upstream_quality_forecast",
+    "promotion_intensity",
+    "shock_risk",
+    "maintenance_known",
+    "unit_reliability_forecast",
+    "queue_pressure_forecast",
+    "network_pressure_forecast",
+    "event_load_forecast",
+    "service_irregularity_risk_forecast",
+    "throughput_disruption_risk_forecast",
+    "nominal_capacity",
+    "zone_sin",
+    "zone_cos",
+]
+
+
+def validate_frame(frame: pd.DataFrame, *, require_target: bool) -> None:
+    required = {"series_id", "timestamp", *FEATURE_COLUMNS}
+    if require_target:
+        required.add("target")
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+    core = ["series_id", "timestamp"] + (["target"] if require_target else [])
+    if frame[core].isna().any().any():
+        raise ValueError(f"Missing values are not allowed in {core}")
+
+
+def fit_preprocessing(frame: pd.DataFrame) -> dict:
+    validate_frame(frame, require_target=True)
+    feature_mean = frame[FEATURE_COLUMNS].mean().fillna(0.0)
+    feature_scale = frame[FEATURE_COLUMNS].std().fillna(1.0).clip(lower=1e-6)
+    target_statistics = {}
+    for series_id, part in frame.groupby("series_id", sort=False):
+        values = part["target"].to_numpy(float)
+        scale = float(values.std())
+        target_statistics[str(series_id)] = (
+            float(values.mean()),
+            scale if scale > 1e-6 else 1.0,
+        )
+    return {
+        "feature_columns": FEATURE_COLUMNS,
+        "feature_mean": feature_mean.to_dict(),
+        "feature_scale": feature_scale.to_dict(),
+        "target_statistics": target_statistics,
+    }
+
+
+def transform_features(frame: pd.DataFrame, preprocessing: dict) -> np.ndarray:
+    columns = preprocessing["feature_columns"]
+    values = frame[columns].astype(float)
+    mean = pd.Series(preprocessing["feature_mean"])[columns]
+    scale = pd.Series(preprocessing["feature_scale"])[columns]
+    # The released data contains sparse missing covariates. Zero is the training mean
+    # after standardization and avoids adding speculative missingness channels.
+    return ((values - mean) / scale).fillna(0.0).to_numpy(np.float32)
+
+
+class WindowDataset(Dataset):
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        context: int,
+        horizon: int,
+        stride: int,
+        preprocessing: dict,
+        series_mapping: dict[str, int],
+    ) -> None:
+        validate_frame(frame, require_target=True)
+        self.context, self.horizon = context, horizon
+        self.series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self.series_mapping = series_mapping
+        self.windows: list[tuple[str, int]] = []
+        for series_id, part in frame.groupby("series_id", sort=False):
+            part = part.sort_values("timestamp")
+            key = str(series_id)
+            values = part["target"].to_numpy(np.float32)
+            mean, scale = preprocessing["target_statistics"][key]
+            self.series[key] = (
+                (values - mean) / scale,
+                transform_features(part, preprocessing),
+            )
+            for start in range(0, len(values) - context - horizon + 1, stride):
+                self.windows.append((key, start))
+
+    def __len__(self) -> int:
+        return len(self.windows)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, ...]:
+        series_id, start = self.windows[index]
+        targets, features = self.series[series_id]
+        split = start + self.context
+        return (
+            torch.from_numpy(targets[start:split]),
+            torch.from_numpy(targets[split : split + self.horizon]),
+            torch.tensor(self.series_mapping[series_id]),
+            torch.from_numpy(features[start:split]),
+            torch.from_numpy(features[split : split + self.horizon]),
+        )

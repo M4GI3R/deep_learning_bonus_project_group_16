@@ -1,46 +1,54 @@
-# How to Train and Submit
+# How to Train and Evaluate
 
-Run the following on the GPU.
+The commands below create the local split automatically when it is missing. Neural
+runs write a resolved `config.yaml`, their best `checkpoint.pt`, local
+`predictions.csv`, and `metrics.json` to `output/<run_name>/`.
 
-## Train and evaluate locally
-
-```bash
-# Ensure the local split exists
-uv run python src/split_data.py
-
-# Train on the local split
-uv run python src/train.py
-
-# Generate local predictions
-uv run python src/generate_predictions.py \
-  --history res/dataset/local_train.csv \
-  --forecast-index res/dataset/local_forecast_index_validation.csv \
-  --output output/local_dlinear/predictions.csv \
-  --checkpoint submission/checkpoint.pt
-
-# Evaluate locally
-uv run python src/evaluate_predictions.py
-```
-
-## Retrain on all public training data
-
-If the local result is sensible, retrain using all public training targets:
+## Run all local baselines
 
 ```bash
-uv run python src/train.py \
-  --train res/dataset/train.csv \
-  --checkpoint submission/checkpoint.pt
+uv run python src/run_baselines.py
 ```
 
-## Generate and upload the validation submission
+This generates and evaluates naive-last-value, lag-24, lag-168, and seasonal-mean
+forecasts in `output/local_baselines/`.
 
-Generate the Hugging Face validation file:
+## Train multivariate DLinear
 
 ```bash
-uv run python submission/predict.py \
-  --input_dir res/dataset \
-  --output_file output/dlinear_validation.csv \
-  --checkpoint submission/checkpoint.pt
+uv run python src/train.py --config configs/dlinear.yaml
 ```
 
-Upload `output/dlinear_validation.csv` to the public validation leaderboard.
+## Train multivariate TCN
+
+```bash
+uv run python src/train.py --config configs/tcn.yaml
+```
+
+Both commands train on `local_train.csv` and use the provided covariates; the TCN
+also feeds the known future values directly to its forecast head. Both select the
+best epoch by WAPE over the complete 336-hour local rollout and stop when validation
+no longer improves.
+
+Configuration values can be overridden without editing YAML:
+
+```bash
+uv run python src/train.py --config configs/tcn.yaml \
+  run_name=tcn_large model.channels=64 max_epochs=500
+```
+
+Run names must be unique because an existing output directory is never silently
+overwritten.
+
+## Retrain a selected run on all public targets
+
+After selecting a sensible local run, retrain its exact configuration for its
+locally selected number of epochs:
+
+```bash
+uv run python src/train.py --full-training-from output/tcn
+```
+
+This creates `output/tcn_full_training/`, containing the resolved configuration,
+checkpoint, and `tcn_validation.csv` ready for leaderboard evaluation. It does not
+modify the `submission/` directory.
