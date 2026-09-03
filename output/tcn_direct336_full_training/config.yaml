@@ -1,4 +1,4 @@
-run_name: tcn_direct336
+run_name: tcn_direct336_full_training
 seed: 16
 context_length: 168
 prediction_length: 336
@@ -22,4 +22,3 @@ model:
   embedding_size: 16
   use_series_embedding: true
   residual_period: 24
-

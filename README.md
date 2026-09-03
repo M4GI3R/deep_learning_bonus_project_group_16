@@ -41,7 +41,7 @@ uv run --with huggingface_hub src/download_data.py
 ## Local Evaluation Pipeline (Recommended)
 
 Use these three commands for the complete local split, baseline generation, neural
-training, rollout prediction, and metric computation:
+training, direct prediction, and metric computation:
 
 ```bash
 uv run python src/run_baselines.py
@@ -49,10 +49,11 @@ uv run python src/train.py --config configs/dlinear.yaml
 uv run python src/train.py --config configs/tcn.yaml
 ```
 
-Each command creates the local split when needed and writes predictions and metrics.
-Neural runs additionally save the resolved YAML configuration and best checkpoint
-under `output/<run_name>/`; validation WAPE over the complete rollout controls early
-stopping.
+Each command creates the local split when needed and writes predictions and all six
+leaderboard metrics. Neural runs additionally save the resolved YAML configuration
+and best checkpoint under `output/<run_name>/`. Checkpoint selection uses a
+scale-free proxy for the public Overall rank across MAE, MSE, RMSE, MAPE, sMAPE,
+and WAPE over the complete direct 336-hour forecast.
 
 ---
 
@@ -82,7 +83,8 @@ uv run python src/evaluate_predictions.py
 This scans `output/` recursively for prediction files and saves individual `[model]_metrics.json` summaries in each model's respective folder.
 
 ### D. Launch the Streamlit Dashboard
-Launch the interface to compare configurations, WAPE improvement, error distribution, and rollout drift:
+Launch the interface to compare configurations, all public metrics, WAPE improvement,
+and error by direct forecast step:
 ```bash
 uv run python dashboard.py
 ```
@@ -104,13 +106,17 @@ Train the multivariate TCN:
 uv run python src/train.py --config configs/tcn.yaml
 ```
 
-Both models consume the released historical covariates; the TCN additionally uses
-the known future values directly. Missing numerical covariates are set to the
-training mean after standardization. Override settings without changing YAML:
+Both models predict all 336 required hours directly, without feeding predictions
+back into the next block. DLinear combines paper-style decomposition and NLinear
+level centering with a known-future covariate head. The TCN processes historical
+and known-future positions in one causal sequence. Missing numerical covariates are
+set to the training mean and accompanied by learned missingness indicators.
+Training jointly optimizes scale-free versions of the six public leaderboard
+metrics in the original target scale. Override settings without changing YAML:
 
 ```bash
 uv run python src/train.py --config configs/tcn.yaml \
-  run_name=tcn_large model.channels=64
+  run_name=tcn_large model.channels=96
 ```
 
 Retrain a selected configuration on all public targets for the locally selected

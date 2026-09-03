@@ -19,8 +19,12 @@ sys.path.insert(0, str(ROOT / "submission"))
 
 from predict import forecast  # noqa: E402
 from config import load_config, write_config  # noqa: E402
-from data import FEATURE_COLUMNS, WindowDataset, fit_preprocessing  # noqa: E402
-from evaluate_predictions import evaluate_file  # noqa: E402
+from data import WindowDataset, fit_preprocessing, transformed_feature_count  # noqa: E402
+from evaluate_predictions import (  # noqa: E402
+    calculate_metrics,
+    calculate_overall_proxy,
+    evaluate_file,
+)
 from src.model import build_model  # noqa: E402
 
 
@@ -61,9 +65,11 @@ def train(
     runtime_config = dict(config)
     runtime_config.update(
         {
-            "num_features": len(FEATURE_COLUMNS),
+            "num_features": transformed_feature_count(preprocessing),
             "num_series": len(series_mapping),
-            "use_series_embedding": config["model"]["type"] == "tcn",
+            "use_series_embedding": bool(
+                config["model"].get("use_series_embedding", True)
+            ),
         }
     )
     runtime_config.update(config["model"])
@@ -79,10 +85,14 @@ def train(
     loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model(runtime_config).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
-    loss_fn = torch.nn.L1Loss()
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config["learning_rate"],
+        weight_decay=config["weight_decay"],
+    )
     max_epochs = epochs or config["max_epochs"]
-    best_wape = float("inf")
+    selection_metric = config["selection_metric"]
+    best_score = float("inf")
     best_epoch = max_epochs
     stale_epochs = 0
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -91,8 +101,17 @@ def train(
 
     for epoch in range(1, max_epochs + 1):
         model.train()
-        total = 0.0
-        for x, y, series_index, history_features, future_features in loader:
+        total_loss = 0.0
+        total_mae = 0.0
+        for (
+            x,
+            y,
+            series_index,
+            history_features,
+            future_features,
+            target_mean,
+            target_scale,
+        ) in loader:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad(set_to_none=True)
             prediction = model(
@@ -101,11 +120,47 @@ def train(
                 history_features=history_features.to(device),
                 future_features=future_features.to(device),
             )
-            loss = loss_fn(prediction, y)
+            # Match the public "Overall" leaderboard: it percentile-ranks MAE,
+            # MSE, RMSE, MAPE, sMAPE, and WAPE equally.  Percentile ranks are not
+            # differentiable within one run, so optimize scale-free versions of
+            # the same six quantities in the original target scale.
+            scale = target_scale.to(device).unsqueeze(1)
+            mean = target_mean.to(device).unsqueeze(1)
+            raw_prediction = prediction * scale + mean
+            raw_target = y * scale + mean
+            absolute_error = torch.abs(raw_prediction - raw_target)
+            squared_error = (raw_prediction - raw_target).square()
+            epsilon = 1e-6
+            mean_abs_target = raw_target.abs().mean().clamp_min(epsilon)
+            mean_square_target = raw_target.square().mean().clamp_min(epsilon)
+            rms_target = mean_square_target.sqrt().clamp_min(epsilon)
+            loss_components = torch.stack(
+                [
+                    absolute_error.mean() / mean_abs_target,
+                    squared_error.mean() / mean_square_target,
+                    squared_error.mean().clamp_min(epsilon).sqrt() / rms_target,
+                    (absolute_error / raw_target.abs().clamp_min(epsilon)).mean(),
+                    (
+                        2.0
+                        * absolute_error
+                        / (raw_target.abs() + raw_prediction.abs()).clamp_min(epsilon)
+                    ).mean(),
+                    absolute_error.sum() / raw_target.abs().sum().clamp_min(epsilon),
+                ]
+            )
+            loss = loss_components.mean()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), config["gradient_clip_norm"]
+            )
             optimizer.step()
-            total += loss.item() * len(x)
-        print(f"epoch={epoch:03d} normalized_mae={total / len(dataset):.6f}")
+            total_loss += loss.item() * len(x)
+            total_mae += absolute_error.mean().item() * len(x)
+        print(
+            f"epoch={epoch:03d} train_overall_proxy="
+            f"{total_loss / len(dataset):.6f} "
+            f"train_mae={total_mae / len(dataset):.6f}"
+        )
 
         if validation is None:
             continue
@@ -119,18 +174,36 @@ def train(
         joined = targets.merge(
             predictions, on=["series_id", "timestamp"], validate="one_to_one"
         )
-        wape = float(
-            np.abs(joined["target"] - joined["prediction"]).sum()
-            / np.abs(joined["target"]).sum()
+        scores = calculate_metrics(
+            joined["target"].to_numpy(), joined["prediction"].to_numpy()
         )
-        print(f"epoch={epoch:03d} validation_wape={wape:.6f}")
-        if wape < best_wape - config["early_stopping_min_delta"]:
-            best_wape, best_epoch, stale_epochs = wape, epoch, 0
+        overall_proxy = calculate_overall_proxy(
+            joined["target"].to_numpy(), joined["prediction"].to_numpy()
+        )
+        score = (
+            overall_proxy
+            if selection_metric == "Overall"
+            else scores[selection_metric]
+        )
+        print(
+            f"validation_mae={scores['MAE']:.6f} "
+            f"validation_mse={scores['MSE']:.6f} "
+            f"validation_rmse={scores['RMSE']:.6f} "
+            f"validation_mape_pct={scores['MAPE (%)']:.6f} "
+            f"validation_smape={scores['sMAPE (%)']:.6f} "
+            f"validation_wape_pct={scores['WAPE']:.6f} "
+            f"validation_overall_proxy={overall_proxy:.6f}"
+        )
+        if score < best_score - config["early_stopping_min_delta"]:
+            best_score, best_epoch, stale_epochs = score, epoch, 0
             torch.save(checkpoint, checkpoint_path)
         else:
             stale_epochs += 1
             if stale_epochs >= config["early_stopping_patience"]:
-                print(f"Early stopping at epoch {epoch}; best epoch was {best_epoch}")
+                print(
+                    f"Early stopping at epoch {epoch}; best {selection_metric} "
+                    f"was {best_score:.6f} at epoch {best_epoch}"
+                )
                 break
 
     if validation is None:

@@ -22,4 +22,3 @@ model:
   embedding_size: 16
   use_series_embedding: true
   residual_period: 24
-

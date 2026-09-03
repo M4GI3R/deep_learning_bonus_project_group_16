@@ -1,7 +1,7 @@
 {
-  "name": "local_dlinear",
+  "name": "local_dlinear_univariate",
   "category": "Root",
-  "display_name": "local_dlinear",
+  "display_name": "local_dlinear_univariate",
   "global_metrics": {
     "MAE": 3.4252977735037176,
     "MSE": 22.223906430058175,

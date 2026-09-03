@@ -15,7 +15,11 @@ def calculate_metrics(y_true, y_pred):
         200
         * np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8))
     )
-    wape = float(np.sum(np.abs(y_true - y_pred)) / np.sum(np.abs(y_true) + 1e-8))
+    wape = float(
+        np.sum(np.abs(y_true - y_pred))
+        / max(float(np.sum(np.abs(y_true))), 1e-8)
+        * 100.0
+    )
     return {
         "MAE": mae,
         "MSE": mse,
@@ -24,6 +28,30 @@ def calculate_metrics(y_true, y_pred):
         "sMAPE (%)": smape,
         "WAPE": wape,
     }
+
+
+def calculate_overall_proxy(y_true, y_pred):
+    """Return a scale-free local proxy for the public percentile-rank aggregate.
+
+    The public leaderboard percentile-ranks all six metrics across submissions.
+    A single checkpoint cannot know those percentiles, so local model selection
+    averages scale-free versions of the same six metrics instead.
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    metrics = calculate_metrics(y_true, y_pred)
+    mean_abs_target = float(np.mean(np.abs(y_true))) + 1e-8
+    mean_square_target = float(np.mean(y_true**2)) + 1e-8
+    rms_target = float(np.sqrt(mean_square_target)) + 1e-8
+    components = [
+        metrics["MAE"] / mean_abs_target,
+        metrics["MSE"] / mean_square_target,
+        metrics["RMSE"] / rms_target,
+        metrics["MAPE (%)"] / 100.0,
+        metrics["sMAPE (%)"] / 100.0,
+        metrics["WAPE"] / 100.0,
+    ]
+    return float(np.mean(components))
 
 
 def validate_prediction_contract(gt_df, pred_df, pred_col, display_name):
@@ -50,21 +78,60 @@ def validate_prediction_contract(gt_df, pred_df, pred_col, display_name):
         )
 
 
-def evaluate_file(gt_df, pred_df, metrics_path, display_name, *, best_epoch=None):
-    """Evaluate one prediction frame and write the compact run metrics artifact."""
+def evaluate_file(
+    gt_df,
+    pred_df,
+    metrics_path,
+    display_name,
+    *,
+    best_epoch=None,
+    category="Root",
+    name=None,
+):
+    """Evaluate one prediction frame and write dashboard-compatible metrics."""
     gt_df = gt_df.copy()
     pred_df = pred_df.copy()
     gt_df["timestamp"] = pd.to_datetime(gt_df["timestamp"])
     pred_df["timestamp"] = pd.to_datetime(pred_df["timestamp"])
     validate_prediction_contract(gt_df, pred_df, "prediction", display_name)
     aligned = gt_df.merge(pred_df, on=["series_id", "timestamp"], validate="one_to_one")
-    payload = {
-        "name": display_name,
-        "best_epoch": best_epoch,
-        "global_metrics": calculate_metrics(
-            aligned["target"].to_numpy(), aligned["prediction"].to_numpy()
-        ),
+    aligned = aligned.sort_values(["series_id", "timestamp"]).reset_index(drop=True)
+    global_metrics = calculate_metrics(
+        aligned["target"].to_numpy(), aligned["prediction"].to_numpy()
+    )
+    global_metrics["WAPE Improvement (%)"] = None
+
+    per_series_smape = {}
+    for series_id, group in aligned.groupby("series_id", sort=False):
+        y_true = group["target"].to_numpy()
+        y_pred = group["prediction"].to_numpy()
+        per_series_smape[str(series_id)] = float(
+            200
+            * np.mean(
+                np.abs(y_true - y_pred)
+                / (np.abs(y_true) + np.abs(y_pred) + 1e-8)
+            )
+        )
+
+    aligned["step"] = aligned.groupby("series_id").cumcount() + 1
+    horizon_mae = {
+        str(int(step)): float(
+            np.mean(np.abs(group["target"] - group["prediction"]))
+        )
+        for step, group in aligned.groupby("step", sort=True)
     }
+
+    payload = {
+        "metric_scale": "leaderboard_percent_v1",
+        "name": name or display_name,
+        "category": category,
+        "display_name": display_name,
+        "global_metrics": global_metrics,
+        "per_series_smape": per_series_smape,
+        "horizon_mae": horizon_mae,
+    }
+    if best_epoch is not None:
+        payload["best_epoch"] = best_epoch
     metrics_path = Path(metrics_path)
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_path.write_text(json.dumps(payload, indent=2))
@@ -234,6 +301,7 @@ def main():
 
         # Save metrics to the individual path, excluding the path key itself
         model_metrics = {
+            "metric_scale": "leaderboard_percent_v1",
             "name": res["name"],
             "category": res["category"],
             "display_name": res["display_name"],

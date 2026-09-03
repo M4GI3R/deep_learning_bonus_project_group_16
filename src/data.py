@@ -49,6 +49,9 @@ def fit_preprocessing(frame: pd.DataFrame) -> dict:
     validate_frame(frame, require_target=True)
     feature_mean = frame[FEATURE_COLUMNS].mean().fillna(0.0)
     feature_scale = frame[FEATURE_COLUMNS].std().fillna(1.0).clip(lower=1e-6)
+    missing_feature_columns = [
+        column for column in FEATURE_COLUMNS if frame[column].isna().any()
+    ]
     target_statistics = {}
     for series_id, part in frame.groupby("series_id", sort=False):
         values = part["target"].to_numpy(float)
@@ -61,6 +64,7 @@ def fit_preprocessing(frame: pd.DataFrame) -> dict:
         "feature_columns": FEATURE_COLUMNS,
         "feature_mean": feature_mean.to_dict(),
         "feature_scale": feature_scale.to_dict(),
+        "missing_feature_columns": missing_feature_columns,
         "target_statistics": target_statistics,
     }
 
@@ -70,9 +74,21 @@ def transform_features(frame: pd.DataFrame, preprocessing: dict) -> np.ndarray:
     values = frame[columns].astype(float)
     mean = pd.Series(preprocessing["feature_mean"])[columns]
     scale = pd.Series(preprocessing["feature_scale"])[columns]
-    # The released data contains sparse missing covariates. Zero is the training mean
-    # after standardization and avoids adding speculative missingness channels.
-    return ((values - mean) / scale).fillna(0.0).to_numpy(np.float32)
+    standardized = ((values - mean) / scale).fillna(0.0).to_numpy(np.float32)
+    missing_columns = preprocessing.get("missing_feature_columns", [])
+    if not missing_columns:
+        return standardized
+    # Missing forecast covariates are not missing completely at random.  Preserve
+    # the safe mean imputation while exposing explicit indicators to the model.
+    missingness = frame[missing_columns].isna().to_numpy(np.float32)
+    return np.concatenate([standardized, missingness], axis=1)
+
+
+def transformed_feature_count(preprocessing: dict) -> int:
+    """Return the number of model inputs after adding missingness indicators."""
+    return len(preprocessing["feature_columns"]) + len(
+        preprocessing.get("missing_feature_columns", [])
+    )
 
 
 class WindowDataset(Dataset):
@@ -88,6 +104,8 @@ class WindowDataset(Dataset):
         validate_frame(frame, require_target=True)
         self.context, self.horizon = context, horizon
         self.series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self.target_means: dict[str, float] = {}
+        self.target_scales: dict[str, float] = {}
         self.series_mapping = series_mapping
         self.windows: list[tuple[str, int]] = []
         for series_id, part in frame.groupby("series_id", sort=False):
@@ -95,6 +113,8 @@ class WindowDataset(Dataset):
             key = str(series_id)
             values = part["target"].to_numpy(np.float32)
             mean, scale = preprocessing["target_statistics"][key]
+            self.target_means[key] = float(mean)
+            self.target_scales[key] = float(scale)
             self.series[key] = (
                 (values - mean) / scale,
                 transform_features(part, preprocessing),
@@ -115,4 +135,6 @@ class WindowDataset(Dataset):
             torch.tensor(self.series_mapping[series_id]),
             torch.from_numpy(features[start:split]),
             torch.from_numpy(features[split : split + self.horizon]),
+            torch.tensor(self.target_means[series_id], dtype=torch.float32),
+            torch.tensor(self.target_scales[series_id], dtype=torch.float32),
         )

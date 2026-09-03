@@ -40,7 +40,12 @@ def validate_config(config: dict[str, Any]) -> None:
         "stride",
         "max_epochs",
         "batch_size",
+        "inference_batch_size",
         "learning_rate",
+        "weight_decay",
+        "gradient_clip_norm",
+        "selection_metric",
+        "prediction_floor",
         "early_stopping_patience",
         "early_stopping_min_delta",
         "model",
@@ -51,6 +56,16 @@ def validate_config(config: dict[str, Any]) -> None:
     model_type = config["model"].get("type")
     if model_type not in {"dlinear", "tcn"}:
         raise ValueError("model.type must be either 'dlinear' or 'tcn'")
+    if config["selection_metric"] not in {
+        "Overall",
+        "MAE",
+        "MSE",
+        "RMSE",
+        "MAPE (%)",
+        "sMAPE (%)",
+        "WAPE",
+    }:
+        raise ValueError("selection_metric must be a leaderboard metric")
     if (
         not str(config["run_name"]).strip()
         or Path(str(config["run_name"])).name != config["run_name"]
@@ -62,9 +77,14 @@ def validate_config(config: dict[str, Any]) -> None:
         "stride",
         "max_epochs",
         "batch_size",
+        "inference_batch_size",
     ):
         if int(config[key]) < 1:
             raise ValueError(f"{key} must be positive")
+    if float(config["weight_decay"]) < 0:
+        raise ValueError("weight_decay must be non-negative")
+    if float(config["gradient_clip_norm"]) <= 0:
+        raise ValueError("gradient_clip_norm must be positive")
 
 
 def write_config(config: dict[str, Any], path: Path) -> None:

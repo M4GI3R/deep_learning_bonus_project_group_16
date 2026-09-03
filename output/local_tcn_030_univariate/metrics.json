@@ -1,7 +1,7 @@
 {
-  "name": "local_tcn",
+  "name": "local_tcn_030_univariate",
   "category": "Root",
-  "display_name": "local_tcn",
+  "display_name": "local_tcn_030_univariate",
   "global_metrics": {
     "MAE": 3.651535746852491,
     "MSE": 24.73907664556461,
