@@ -40,17 +40,20 @@ uv run --with huggingface_hub src/download_data.py
 
 ## Local Evaluation Pipeline (Recommended)
 
-To automate the entire local training split, baseline generation, metrics pre-computation, and dashboard visualization in a single run:
+Use these three commands for the complete local split, baseline generation, neural
+training, direct prediction, and metric computation:
 
 ```bash
-uv run python src/run_local_pipeline.py
+uv run python src/run_baselines.py
+uv run python src/train.py --config configs/dlinear.yaml
+uv run python src/train.py --config configs/tcn.yaml
 ```
 
-This pipeline automatically handles the following sequence:
-1. Splits `train.csv` to hold out the last 336 steps of each series for local validation.
-2. Runs the baseline forecasts on the local training split.
-3. Precomputes and writes model-specific metrics (e.g. `output/local_baselines/seasonal_mean_metrics.json`).
-4. Launches the Streamlit evaluation dashboard.
+Each command creates the local split when needed and writes predictions and all six
+leaderboard metrics. Neural runs additionally save the resolved YAML configuration
+and best checkpoint under `output/<run_name>/`. Checkpoint selection uses a
+scale-free proxy for the public Overall rank across MAE, MSE, RMSE, MAPE, sMAPE,
+and WAPE over the complete direct 336-hour forecast.
 
 ---
 
@@ -67,20 +70,9 @@ This generates `local_train.csv`, `local_validation_input.csv`, `local_validatio
 
 ### B. Run Baseline Forecasts
 
-#### On the Global Validation Index (for Hugging Face Leaderboard submission):
+#### On the local validation split:
 ```bash
-uv run res/provided_res/baseline/run_baselines.py \
-  --train res/dataset/train.csv \
-  --forecast-index res/dataset/forecast_index_validation.csv \
-  --output-dir output/provided_baselines
-```
-
-#### On the Local Validation Split (for local backtesting):
-```bash
-uv run res/provided_res/baseline/run_baselines.py \
-  --train res/dataset/local_train.csv \
-  --forecast-index res/dataset/local_forecast_index_validation.csv \
-  --output-dir output/local_baselines
+uv run python src/run_baselines.py
 ```
 
 ### C. Precompute Performance Metrics
@@ -91,7 +83,8 @@ uv run python src/evaluate_predictions.py
 This scans `output/` recursively for prediction files and saves individual `[model]_metrics.json` summaries in each model's respective folder.
 
 ### D. Launch the Streamlit Dashboard
-Launch the interface to compare configurations, WAPE improvement, error distribution, and rollout drift:
+Launch the interface to compare configurations, all public metrics, WAPE improvement,
+and error by direct forecast step:
 ```bash
 uv run python dashboard.py
 ```
@@ -99,70 +92,38 @@ uv run python dashboard.py
 
 ---
 
-## Sprint 1: DLinear
+## Multivariate neural models
 
-Train the small DLinear proof model on the local split:
-
-```bash
-uv run python src/train.py --model dlinear
-```
-
-Evaluate it through the same minimal inference package used for submission:
+Train multivariate DLinear on the local split:
 
 ```bash
-uv run python src/generate_predictions.py \
-  --history res/dataset/local_train.csv \
-  --forecast-index res/dataset/local_forecast_index_validation.csv \
-  --output output/local_dlinear/predictions.csv \
-  --checkpoint submission/checkpoint.pt
+uv run python src/train.py --config configs/dlinear.yaml
 ```
 
-For the public Hugging Face validation run, train on all known targets and use
-the provided validation input/index:
+Train the multivariate TCN:
 
 ```bash
-uv run python src/train.py \
-  --train res/dataset/train.csv \
-  --model dlinear \
-  --checkpoint submission/checkpoint.pt
-
-uv run python submission/predict.py \
-  --input_dir res/dataset \
-  --output_file output/dlinear_validation.csv \
-  --checkpoint submission/checkpoint.pt
+uv run python src/train.py --config configs/tcn.yaml
 ```
 
-`src/` and the dashboard are development-only. The independent `submission/`
-directory is the slim offline artifact: it contains only inference code,
-requirements, and the generated checkpoint. Run the heavy training and upload
-the resulting validation CSV from the GPU environment.
-
-## Sprint 2: TCN
-
-The default model is a compact global TCN with daily residual prediction,
-hour/day calendar features, and learned series embeddings:
+Both models predict all 336 required hours directly, without feeding predictions
+back into the next block. DLinear combines paper-style decomposition and NLinear
+level centering with a known-future covariate head. The TCN processes historical
+and known-future positions in one causal sequence. Missing numerical covariates are
+set to the training mean and accompanied by learned missingness indicators.
+Training jointly optimizes scale-free versions of the six public leaderboard
+metrics in the original target scale. Override settings without changing YAML:
 
 ```bash
-uv run python src/train.py --model tcn
+uv run python src/train.py --config configs/tcn.yaml \
+  run_name=tcn_large model.channels=96
 ```
 
-Generate and evaluate local predictions with the same commands shown above.
-Once the run is sound, retrain on `res/dataset/train.csv` and invoke
-`submission/predict.py` to create the Hugging Face validation CSV.
-
-The promising adaptations are already switchable without adding model variants:
+Retrain a selected configuration on all public targets for the locally selected
+number of epochs and generate its validation CSV:
 
 ```bash
-# Pure target-history TCN
-uv run python src/train.py --model tcn \
-  --no-calendar --no-series-embedding --residual-period 0
-
-# Weekly instead of daily seasonal residual
-uv run python src/train.py --model tcn --residual-period 168
-
-# Wider model, only if the default underfits
-uv run python src/train.py --model tcn --channels 64
+uv run python src/train.py --full-training-from output/tcn
 ```
 
-Keep the default configuration for the first online TCN run so calendar and
-unit-specific information are available. Change one switch at a time afterward.
+See `docs/how_to_train_and_submit.md` for the generated files and full workflow.

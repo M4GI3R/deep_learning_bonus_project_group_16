@@ -1,24 +1,58 @@
-import os
 import json
 from pathlib import Path
 import pandas as pd
 import numpy as np
 
+
 def calculate_metrics(y_true, y_pred):
     mae = float(np.mean(np.abs(y_true - y_pred)))
     mse = float(np.mean((y_true - y_pred) ** 2))
     rmse = float(np.sqrt(mse))
-    mape = float(np.mean(np.abs((y_true - y_pred) / np.clip(np.abs(y_true), 1e-8, None))) * 100)
-    smape = float(200 * np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8)))
-    wape = float(np.sum(np.abs(y_true - y_pred)) / np.sum(np.abs(y_true) + 1e-8))
+    mape = float(
+        np.mean(np.abs((y_true - y_pred) / np.clip(np.abs(y_true), 1e-8, None))) * 100
+    )
+    smape = float(
+        200
+        * np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8))
+    )
+    wape = float(
+        np.sum(np.abs(y_true - y_pred))
+        / max(float(np.sum(np.abs(y_true))), 1e-8)
+        * 100.0
+    )
     return {
         "MAE": mae,
         "MSE": mse,
         "RMSE": rmse,
         "MAPE (%)": mape,
         "sMAPE (%)": smape,
-        "WAPE": wape
+        "WAPE": wape,
     }
+
+
+def calculate_overall_proxy(y_true, y_pred):
+    """Return a scale-free local proxy for the public percentile-rank aggregate.
+
+    The public leaderboard percentile-ranks all six metrics across submissions.
+    A single checkpoint cannot know those percentiles, so local model selection
+    averages scale-free versions of the same six metrics instead.
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    metrics = calculate_metrics(y_true, y_pred)
+    mean_abs_target = float(np.mean(np.abs(y_true))) + 1e-8
+    mean_square_target = float(np.mean(y_true**2)) + 1e-8
+    rms_target = float(np.sqrt(mean_square_target)) + 1e-8
+    components = [
+        metrics["MAE"] / mean_abs_target,
+        metrics["MSE"] / mean_square_target,
+        metrics["RMSE"] / rms_target,
+        metrics["MAPE (%)"] / 100.0,
+        metrics["sMAPE (%)"] / 100.0,
+        metrics["WAPE"] / 100.0,
+    ]
+    return float(np.mean(components))
+
 
 def validate_prediction_contract(gt_df, pred_df, pred_col, display_name):
     """Reject incomplete or ambiguous forecasts before calculating metrics."""
@@ -43,6 +77,67 @@ def validate_prediction_contract(gt_df, pred_df, pred_col, display_name):
             f"missing={len(missing)}, extra={len(extra)}"
         )
 
+
+def evaluate_file(
+    gt_df,
+    pred_df,
+    metrics_path,
+    display_name,
+    *,
+    best_epoch=None,
+    category="Root",
+    name=None,
+):
+    """Evaluate one prediction frame and write dashboard-compatible metrics."""
+    gt_df = gt_df.copy()
+    pred_df = pred_df.copy()
+    gt_df["timestamp"] = pd.to_datetime(gt_df["timestamp"])
+    pred_df["timestamp"] = pd.to_datetime(pred_df["timestamp"])
+    validate_prediction_contract(gt_df, pred_df, "prediction", display_name)
+    aligned = gt_df.merge(pred_df, on=["series_id", "timestamp"], validate="one_to_one")
+    aligned = aligned.sort_values(["series_id", "timestamp"]).reset_index(drop=True)
+    global_metrics = calculate_metrics(
+        aligned["target"].to_numpy(), aligned["prediction"].to_numpy()
+    )
+    global_metrics["WAPE Improvement (%)"] = None
+
+    per_series_smape = {}
+    for series_id, group in aligned.groupby("series_id", sort=False):
+        y_true = group["target"].to_numpy()
+        y_pred = group["prediction"].to_numpy()
+        per_series_smape[str(series_id)] = float(
+            200
+            * np.mean(
+                np.abs(y_true - y_pred)
+                / (np.abs(y_true) + np.abs(y_pred) + 1e-8)
+            )
+        )
+
+    aligned["step"] = aligned.groupby("series_id").cumcount() + 1
+    horizon_mae = {
+        str(int(step)): float(
+            np.mean(np.abs(group["target"] - group["prediction"]))
+        )
+        for step, group in aligned.groupby("step", sort=True)
+    }
+
+    payload = {
+        "metric_scale": "leaderboard_percent_v1",
+        "name": name or display_name,
+        "category": category,
+        "display_name": display_name,
+        "global_metrics": global_metrics,
+        "per_series_smape": per_series_smape,
+        "horizon_mae": horizon_mae,
+    }
+    if best_epoch is not None:
+        payload["best_epoch"] = best_epoch
+    metrics_path = Path(metrics_path)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.write_text(json.dumps(payload, indent=2))
+    return payload
+
+
 def main():
     # Resolve paths
     script_dir = Path(__file__).resolve().parent
@@ -50,25 +145,27 @@ def main():
     output_dir = project_root / "output"
     dataset_dir = project_root / "res" / "dataset"
     gt_path = dataset_dir / "local_validation_targets.csv"
-    
+
     if not gt_path.exists():
-        print(f"Error: Local validation targets ground truth file not found at {gt_path}")
+        print(
+            f"Error: Local validation targets ground truth file not found at {gt_path}"
+        )
         print("Please split the dataset first: uv run python src/split_data.py")
         return
-        
+
     print(f"Loading local ground truth targets from {gt_path}...")
     gt_df = pd.read_csv(gt_path)
     gt_df["timestamp"] = pd.to_datetime(gt_df["timestamp"])
-    
+
     # Discover prediction CSV files in output/ recursively
     print(f"Scanning {output_dir} for prediction files...")
     prediction_files = []
-    
+
     for file in output_dir.rglob("*.csv"):
         # Ignore files that are obviously not predictions
         if file.name.startswith("metrics"):
             continue
-            
+
         try:
             # Quick validation of schema
             df_head = pd.read_csv(file, nrows=2)
@@ -78,73 +175,90 @@ def main():
             # Must have either "prediction" or "target" (ground truth)
             if "prediction" not in df_head.columns and "target" not in df_head.columns:
                 continue
-                
+
             # Determine directory structure
-            rel_path = file.relative_to(output_dir)
-            
             if file.name.lower() in ["predictions.csv", "prediction.csv"]:
                 # Nested layout: output/<category>/<model_name>/predictions.csv
                 model_name = file.parent.name
-                category = file.parent.parent.name if file.parent.parent != output_dir else "Root"
+                category = (
+                    file.parent.parent.name
+                    if file.parent.parent != output_dir
+                    else "Root"
+                )
                 metrics_path = file.parent / "metrics.json"
             else:
                 # Flat layout: output/<category>/<model_name>.csv
                 model_name = file.stem
                 category = file.parent.name if file.parent != output_dir else "Root"
                 metrics_path = file.parent / f"{file.stem}_metrics.json"
-                
-            display_name = f"{category} / {model_name}" if category != "Root" else model_name
-            
-            prediction_files.append({
-                "name": model_name,
-                "category": category,
-                "display_name": display_name,
-                "path": file,
-                "metrics_path": metrics_path
-            })
+
+            display_name = (
+                f"{category} / {model_name}" if category != "Root" else model_name
+            )
+
+            prediction_files.append(
+                {
+                    "name": model_name,
+                    "category": category,
+                    "display_name": display_name,
+                    "path": file,
+                    "metrics_path": metrics_path,
+                }
+            )
         except Exception:
             # Not a valid CSV or permission error
             continue
-        
+
     if not prediction_files:
         print("No prediction files found in the output directory.")
         return
-        
+
     print(f"Found {len(prediction_files)} prediction files. Evaluating...")
-    
+
     results = {}
-    
+
     # 1. First Pass: Compute basic metrics for all discovered predictions
     for pred in prediction_files:
         print(f"Evaluating {pred['display_name']}...")
         try:
             pred_df = pd.read_csv(pred["path"])
             pred_df["timestamp"] = pd.to_datetime(pred_df["timestamp"])
-            
+
             # Align predictions with ground truth
             # Supporting prediction column named "prediction" or "target"
             pred_col = "prediction" if "prediction" in pred_df.columns else "target"
 
             validate_prediction_contract(gt_df, pred_df, pred_col, pred["display_name"])
-            
-            aligned = pd.merge(gt_df, pred_df, on=["series_id", "timestamp"], how="inner")
-            
+
+            aligned = pd.merge(
+                gt_df, pred_df, on=["series_id", "timestamp"], how="inner"
+            )
+
             if aligned.empty:
-                print(f"Warning: No aligned timestamps found for {pred['display_name']}. Skipping.")
+                print(
+                    f"Warning: No aligned timestamps found for {pred['display_name']}. Skipping."
+                )
                 continue
-                
-            aligned = aligned.sort_values(by=["series_id", "timestamp"]).reset_index(drop=True)
-            
+
+            aligned = aligned.sort_values(by=["series_id", "timestamp"]).reset_index(
+                drop=True
+            )
+
             # Global Metrics
-            global_scores = calculate_metrics(aligned["target"].to_numpy(), aligned[pred_col].to_numpy())
-            
+            global_scores = calculate_metrics(
+                aligned["target"].to_numpy(), aligned[pred_col].to_numpy()
+            )
+
             # Per-Series sMAPE (for Boxplot)
             series_smapes = {}
             for series_id, s_group in aligned.groupby("series_id"):
                 y_t = s_group["target"].to_numpy()
                 y_p = s_group[pred_col].to_numpy()
-                series_smapes[series_id] = float(200 * np.mean(np.abs(y_t - y_p) / (np.abs(y_t) + np.abs(y_p) + 1e-8)))
-                
+                series_smapes[series_id] = float(
+                    200
+                    * np.mean(np.abs(y_t - y_p) / (np.abs(y_t) + np.abs(y_p) + 1e-8))
+                )
+
             # Horizon Error (MAE per step)
             aligned["step"] = aligned.groupby("series_id").cumcount() + 1
             horizon_mae = {}
@@ -152,7 +266,7 @@ def main():
                 y_t = step_group["target"].to_numpy()
                 y_p = step_group[pred_col].to_numpy()
                 horizon_mae[int(step)] = float(np.mean(np.abs(y_t - y_p)))
-                
+
             results[pred["display_name"]] = {
                 "name": pred["name"],
                 "category": pred["category"],
@@ -160,11 +274,11 @@ def main():
                 "global_metrics": global_scores,
                 "per_series_smape": series_smapes,
                 "horizon_mae": horizon_mae,
-                "metrics_path": pred["metrics_path"]
+                "metrics_path": pred["metrics_path"],
             }
         except Exception as e:
             print(f"Error evaluating {pred['display_name']}: {e}")
-            
+
     # 2. Second Pass: Calculate WAPE improvement against the single
     # naive-last-value reference and save individual JSON files.
     baseline_result = next(
@@ -182,26 +296,28 @@ def main():
         if baseline_wape is not None and baseline_wape > 0:
             model_wape = res["global_metrics"]["WAPE"]
             improvement = float((baseline_wape - model_wape) / baseline_wape * 100)
-                
+
         res["global_metrics"]["WAPE Improvement (%)"] = improvement
-        
+
         # Save metrics to the individual path, excluding the path key itself
         model_metrics = {
+            "metric_scale": "leaderboard_percent_v1",
             "name": res["name"],
             "category": res["category"],
             "display_name": res["display_name"],
             "global_metrics": res["global_metrics"],
             "per_series_smape": res["per_series_smape"],
-            "horizon_mae": res["horizon_mae"]
+            "horizon_mae": res["horizon_mae"],
         }
-        
+
         metrics_file = res["metrics_path"]
         print(f"Saving metrics for {d_name} to {metrics_file}...")
         metrics_file.parent.mkdir(parents=True, exist_ok=True)
         with open(metrics_file, "w") as f:
             json.dump(model_metrics, f, indent=2)
-            
+
     print("Pre-computation of model-specific metrics complete!")
+
 
 if __name__ == "__main__":
     main()

@@ -57,6 +57,10 @@ def discover_and_load_metrics(output_path: Path):
                     data = json.load(f)
                 # Verify metrics schema
                 if "global_metrics" in data and "horizon_mae" in data:
+                    if data.get("metric_scale") != "leaderboard_percent_v1":
+                        # Metrics created before the public-formula alignment
+                        # stored WAPE as a fraction while the Space uses percent.
+                        data["global_metrics"]["WAPE"] *= 100.0
                     display_name = data.get("display_name", file.stem)
                     results[display_name] = data
             except Exception:
@@ -106,12 +110,31 @@ if not selected_models:
 # ---------------------------------------------------------------------------
 st.markdown("<div class='section-title'>Operations Leaderboard Matrix</div>", unsafe_allow_html=True)
 
-# The leaderboard always contains every evaluated model.  The sidebar only
-# controls the visual comparisons, so reference baselines such as
-# ``seasonal_mean`` cannot disappear from the table.
+# Match the public leaderboard's hidden Overall score: percentile-rank every
+# available error metric and average the six percentile ranks.
+metric_columns = ("MAE", "MSE", "RMSE", "MAPE (%)", "sMAPE (%)", "WAPE")
+rank_frame = pd.DataFrame(
+    {
+        display_name: {
+            metric: metrics_data[display_name]["global_metrics"][metric]
+            for metric in metric_columns
+        }
+        for display_name in metrics_data
+    }
+).T
+overall_rank_scores = pd.concat(
+    [
+        rank_frame[metric].rank(method="average", pct=True, ascending=True)
+        for metric in metric_columns
+    ],
+    axis=1,
+).mean(axis=1)
+
+# The leaderboard always contains every evaluated model. The sidebar only
+# controls plots, so reference baselines cannot disappear from the table.
 leaderboard_models = sorted(
     metrics_data,
-    key=lambda display_name: metrics_data[display_name]["global_metrics"]["MAE"],
+    key=lambda display_name: overall_rank_scores.loc[display_name],
 )
 
 # ``naive_last_value`` is the sole reference baseline, irrespective of its
@@ -129,23 +152,39 @@ baseline_wape = (
     if baseline_name is not None
     else None
 )
+seasonal_name = next(
+    (
+        display_name
+        for display_name, model_info in metrics_data.items()
+        if model_info["name"] == "seasonal_mean"
+    ),
+    None,
+)
+seasonal_wape = (
+    metrics_data[seasonal_name]["global_metrics"]["WAPE"]
+    if seasonal_name is not None
+    else None
+)
 
 # Construct table rows
 html_table = "<div class='se-table-container'><table class='se-table'>"
 html_table += "<thead><tr>"
 html_table += "<th>Rank</th>"
+html_table += "<th>Overall</th>"
 html_table += "<th>Category</th>"
 html_table += "<th>Model Name</th>"
 html_table += "<th>MAE</th>"
+html_table += "<th>MSE</th>"
 html_table += "<th>RMSE</th>"
+html_table += "<th>MAPE (%)</th>"
 html_table += "<th>sMAPE (%)</th>"
-html_table += "<th>WAPE</th>"
+html_table += "<th>WAPE (%)</th>"
 html_table += "<th>WAPE Improvement vs Naive (%)</th>"
+html_table += "<th>WAPE Improvement vs Seasonal (%)</th>"
 html_table += "</tr></thead><tbody>"
 
-# Highlight the minimum value in every error-metric column.  Ties are all
-# highlighted, rather than selecting an arbitrary single winner.
-metric_columns = ("MAE", "RMSE", "sMAPE (%)", "WAPE")
+# Highlight the minimum value in every error-metric column. Ties are all
+# highlighted rather than selecting an arbitrary winner.
 best_metric_values = {
     metric: min(metrics_data[d_name]["global_metrics"][metric] for d_name in leaderboard_models)
     for metric in metric_columns
@@ -158,13 +197,18 @@ for rank, d_name in enumerate(leaderboard_models, start=1):
     cat = m_info["category"]
     name = m_info["name"]
     mae = metrics["MAE"]
+    mse = metrics["MSE"]
     rmse = metrics["RMSE"]
+    mape = metrics["MAPE (%)"]
     smape = metrics["sMAPE (%)"]
     wape = metrics["WAPE"]
     is_baseline = m_info["name"] == "naive_last_value"
     improvement = None
     if baseline_wape is not None and baseline_wape > 0:
         improvement = (baseline_wape - wape) / baseline_wape * 100
+    seasonal_improvement = None
+    if seasonal_wape is not None and seasonal_wape > 0:
+        seasonal_improvement = (seasonal_wape - wape) / seasonal_wape * 100
 
     # Only the naïve last-value reference receives whole-row highlighting.
     row_style = (
@@ -175,14 +219,19 @@ for rank, d_name in enumerate(leaderboard_models, start=1):
         
     html_table += f"<tr {row_style}>"
     html_table += f"<td>{rank}</td>"
+    html_table += f"<td>{overall_rank_scores.loc[d_name]:.4f}</td>"
     html_table += f"<td style='color:#00ADB5;'><i>{cat}</i></td>"
     html_table += f"<td><b>{name}</b></td>"
     mae_style = "style='color: #2ECC71; font-weight: 700;'" if np.isclose(mae, best_metric_values["MAE"]) else ""
+    mse_style = "style='color: #2ECC71; font-weight: 700;'" if np.isclose(mse, best_metric_values["MSE"]) else ""
     rmse_style = "style='color: #2ECC71; font-weight: 700;'" if np.isclose(rmse, best_metric_values["RMSE"]) else ""
+    mape_style = "style='color: #2ECC71; font-weight: 700;'" if np.isclose(mape, best_metric_values["MAPE (%)"]) else ""
     smape_style = "style='color: #2ECC71; font-weight: 700;'" if np.isclose(smape, best_metric_values["sMAPE (%)"]) else ""
     wape_style = "style='color: #2ECC71; font-weight: 700;'" if np.isclose(wape, best_metric_values["WAPE"]) else ""
     html_table += f"<td {mae_style}>{mae:.4f}</td>"
+    html_table += f"<td {mse_style}>{mse:.4f}</td>"
     html_table += f"<td {rmse_style}>{rmse:.4f}</td>"
+    html_table += f"<td {mape_style}>{mape:.2f}%</td>"
     html_table += f"<td {smape_style}>{smape:.2f}%</td>"
     html_table += f"<td {wape_style}>{wape:.4f}</td>"
 
@@ -198,6 +247,17 @@ for rank, d_name in enumerate(leaderboard_models, start=1):
         imp_html = "<span style='color: #888888;'>0.00%</span>"
         
     html_table += f"<td>{imp_html}</td>"
+    if name == "seasonal_mean":
+        seasonal_html = "<span style='color: #F1C40F;'>Baseline (Seasonal)</span>"
+    elif seasonal_improvement is None:
+        seasonal_html = "<span style='color: #888888;'>Unavailable</span>"
+    elif seasonal_improvement > 0:
+        seasonal_html = f"<span style='color: #2ECC71;'>+{seasonal_improvement:.2f}%</span>"
+    elif seasonal_improvement < 0:
+        seasonal_html = f"<span style='color: #E74C3C;'>{seasonal_improvement:.2f}%</span>"
+    else:
+        seasonal_html = "<span style='color: #888888;'>0.00%</span>"
+    html_table += f"<td>{seasonal_html}</td>"
     html_table += "</tr>"
 
 html_table += "</tbody></table></div>"
@@ -211,8 +271,8 @@ st.markdown("<div class='section-title'>Visual Telemetry & Drift Analysis</div>"
 plot_col1, plot_col2 = st.columns(2)
 
 with plot_col1:
-    st.markdown("### Horizon Error Drift (MAE vs Step)")
-    st.caption("Lower is better. Demonstrates error accumulation over the 336-hour forecast rollout.")
+    st.markdown("### Forecast Horizon Error (MAE vs Step)")
+    st.caption("Lower is better. Direct models predict all 336 hours without target rollout.")
     
     drift_fig = go.Figure()
     
@@ -234,7 +294,7 @@ with plot_col1:
         
     drift_fig.update_layout(
         template="plotly_dark",
-        xaxis_title="Rollout Step (Hours Ahead)",
+        xaxis_title="Forecast Step (Hours Ahead)",
         yaxis_title="Mean Absolute Error (MAE)",
         margin=dict(l=10, r=10, t=10, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
