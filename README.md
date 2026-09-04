@@ -67,8 +67,6 @@ configs/
   dlinear.yaml              Operations DLinear configuration
   tcn.yaml                  Operations TCN configuration
   electricity_*.yaml        Electricity model configurations
-docs/
-  how_to_train_and_submit.md
 res/
   datasets/                 Reproducibly generated data (not versioned)
   figures/                  Architecture and dashboard figures
@@ -273,9 +271,15 @@ bash scripts/build_submission.sh
 The builder copies only the final TCN checkpoint, runs the standalone entry point
 on the public validation inputs, and creates `submission/final_submission.zip`.
 Its archive root contains exactly `predict.py`, `requirements.txt`,
-`checkpoint.pt`, and `src/`. Detailed instructions and the private evaluator
-contract are in
-[`docs/how_to_train_and_submit.md`](docs/how_to_train_and_submit.md).
+`checkpoint.pt`, and `src/`. After extraction into `/submission`, the private
+evaluator runs:
+
+```bash
+python predict.py \
+  --input_dir /data/input \
+  --output_file /output/predictions.csv \
+  --checkpoint /submission/checkpoint.pt
+```
 
 ## Tests
 

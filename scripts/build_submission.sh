@@ -41,8 +41,7 @@ uv run python "${SUBMISSION_DIR}/predict.py" \
     zip -q final_submission.zip \
       predict.py requirements.txt checkpoint.pt src/__init__.py src/model.py
   else
-    uv run python -m zipfile -c final_submission.zip \
-      predict.py requirements.txt checkpoint.pt src/__init__.py src/model.py
+    uv run python -c 'from zipfile import ZIP_DEFLATED, ZipFile; files = ("predict.py", "requirements.txt", "checkpoint.pt", "src/__init__.py", "src/model.py"); archive = ZipFile("final_submission.zip", "w", ZIP_DEFLATED); [archive.write(path, path) for path in files]; archive.close()'
   fi
 )
 
