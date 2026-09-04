@@ -1,0 +1,35 @@
+name: operations_forecasting_2026
+aliases:
+  - operations
+  - ops
+source:
+  type: huggingface_snapshot
+  repo_id: AIML-TUDA/dlam-ts-project-data-2026
+  revision: fdac7215da857bc1bd210f381051e6d01d12e0db
+table_format: csv
+default_feature_set: provided
+feature_sets:
+  provided:
+    - hour_sin
+    - hour_cos
+    - dow_sin
+    - dow_cos
+    - is_weekend
+    - trend
+    - workload_intensity
+    - demand_forecast
+    - staffing_forecast
+    - upstream_quality_forecast
+    - promotion_intensity
+    - shock_risk
+    - maintenance_known
+    - unit_reliability_forecast
+    - queue_pressure_forecast
+    - network_pressure_forecast
+    - event_load_forecast
+    - service_irregularity_risk_forecast
+    - throughput_disruption_risk_forecast
+    - nominal_capacity
+    - zone_sin
+    - zone_cos
+validation_horizon: 336

@@ -1,1 +1,1 @@
-"""Minimal model package used by the offline submission."""
+"""Fixed TCN package for the final private-evaluation archive."""

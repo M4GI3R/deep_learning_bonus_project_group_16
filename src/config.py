@@ -14,6 +14,11 @@ def load_config(path: Path, overrides: list[str]) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise TypeError("Configuration root must be a mapping")
     config = deepcopy(config)
+    # Defaults keep configs and checkpoints created before multi-dataset support
+    # compatible with the original operations dataset.
+    config.setdefault("dataset", "operations_forecasting_2026")
+    config.setdefault("feature_set", "provided")
+    config.setdefault("training_objective", "overall")
     for override in overrides:
         if "=" not in override:
             raise ValueError(f"Invalid override {override!r}; expected key=value")
@@ -33,6 +38,9 @@ def load_config(path: Path, overrides: list[str]) -> dict[str, Any]:
 
 def validate_config(config: dict[str, Any]) -> None:
     required = {
+        "dataset",
+        "feature_set",
+        "training_objective",
         "run_name",
         "seed",
         "context_length",
@@ -53,6 +61,12 @@ def validate_config(config: dict[str, Any]) -> None:
     missing = required.difference(config)
     if missing:
         raise ValueError(f"Missing configuration keys: {sorted(missing)}")
+    if not str(config["dataset"]).strip():
+        raise ValueError("dataset must be non-empty")
+    if not str(config["feature_set"]).strip():
+        raise ValueError("feature_set must be non-empty")
+    if config["training_objective"] not in {"overall", "wape"}:
+        raise ValueError("training_objective must be either 'overall' or 'wape'")
     model_type = config["model"].get("type")
     if model_type not in {"dlinear", "tcn"}:
         raise ValueError("model.type must be either 'dlinear' or 'tcn'")

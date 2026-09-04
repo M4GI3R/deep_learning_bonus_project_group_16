@@ -1,12 +1,15 @@
 [project]
 name = "deep-learning-bonus-project-group-16"
 version = "0.1.0"
-description = "Add your description here"
+description = "Direct multi-horizon forecasting with covariate-aware DLinear and TCN models"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "holidays>=0.70",
+    "huggingface-hub>=0.30",
     "pandas>=2.2",
     "numpy>=1.26",
+    "pyarrow>=18.0",
     "torch>=2.2",
     "streamlit>=1.30.0",
     "plotly>=5.18.0",

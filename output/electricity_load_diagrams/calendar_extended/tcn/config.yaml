@@ -1,0 +1,27 @@
+run_name: tcn
+dataset: electricity_load_diagrams
+feature_set: calendar_extended
+training_objective: wape
+seed: 16
+context_length: 168
+prediction_length: 336
+stride: 96
+max_epochs: 100
+batch_size: 128
+inference_batch_size: 32
+learning_rate: 0.0005
+weight_decay: 0.0001
+gradient_clip_norm: 1.0
+selection_metric: WAPE
+prediction_floor: 0.0
+early_stopping_patience: 12
+early_stopping_min_delta: 0.0001
+model:
+  type: tcn
+  channels: 64
+  levels: 7
+  kernel_size: 3
+  dropout: 0.15
+  embedding_size: 16
+  use_series_embedding: true
+  residual_period: 24
