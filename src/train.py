@@ -284,7 +284,10 @@ def train(
                 )
                 should_stop = True
         history_rows.append(history_row)
-        pd.DataFrame(history_rows).to_csv(output_dir / "history.csv", index=False)
+        try:
+            pd.DataFrame(history_rows).to_csv(output_dir / "history.csv", index=False)
+        except OSError as e:
+            print(f"Warning: failed to write history.csv: {e}")
         if should_stop:
             break
 
