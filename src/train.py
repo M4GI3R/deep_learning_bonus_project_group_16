@@ -15,17 +15,31 @@ import yaml
 from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "submission"))
+sys.path.insert(0, str(ROOT))
 
-from predict import forecast  # noqa: E402
-from config import load_config, write_config  # noqa: E402
-from data import WindowDataset, fit_preprocessing, transformed_feature_count  # noqa: E402
-from evaluate_predictions import (  # noqa: E402
+from src.config import load_config, write_config  # noqa: E402
+from src.data import (  # noqa: E402
+    WindowDataset,
+    fit_preprocessing,
+    transformed_feature_count,
+)
+from src.datasets.registry import (  # noqa: E402
+    base_table_path,
+    canonical_dataset_name,
+    model_category,
+    model_run_dir,
+    prepare_features,
+    read_table,
+    resolve_feature_set,
+    split_table_path,
+)
+from src.evaluate_predictions import (  # noqa: E402
     calculate_metrics,
     calculate_overall_proxy,
     evaluate_file,
 )
 from src.model import build_model  # noqa: E402
+from src.predict import forecast  # noqa: E402
 
 
 def make_checkpoint(
@@ -50,6 +64,7 @@ def train(
     config: dict,
     train_frame: pd.DataFrame,
     *,
+    feature_columns: list[str],
     validation: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None,
     output_dir: Path,
     epochs: int | None = None,
@@ -57,7 +72,7 @@ def train(
     random.seed(config["seed"])
     np.random.seed(config["seed"])
     torch.manual_seed(config["seed"])
-    preprocessing = fit_preprocessing(train_frame)
+    preprocessing = fit_preprocessing(train_frame, feature_columns)
     series_mapping = {
         str(value): index
         for index, value in enumerate(train_frame["series_id"].unique())
@@ -90,14 +105,49 @@ def train(
         lr=config["learning_rate"],
         weight_decay=config["weight_decay"],
     )
-    max_epochs = epochs or config["max_epochs"]
+    max_epochs = epochs if epochs is not None else config["max_epochs"]
     selection_metric = config["selection_metric"]
     best_score = float("inf")
     best_epoch = max_epochs
     stale_epochs = 0
+    history_rows: list[dict] = []
     output_dir.mkdir(parents=True, exist_ok=False)
     write_config(config, output_dir / "config.yaml")
     checkpoint_path = output_dir / "checkpoint.pt"
+
+    model_type = str(config["model"]["type"])
+    model_label = {"dlinear": "DLinear", "tcn": "TCN"}.get(
+        model_type.lower(), model_type
+    )
+    training_mode = "full training" if validation is None else "local holdout"
+    covariate_names = ", ".join(feature_columns) if feature_columns else "none"
+    trainable_parameters = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
+    print("\n" + "=" * 72)
+    print(
+        f"Starting {model_label} training | dataset={config['dataset']} "
+        f"feature_set={config['feature_set']} run={config['run_name']}"
+    )
+    print(
+        f"mode={training_mode} objective={config['training_objective']} "
+        f"selection_metric={selection_metric} epochs={max_epochs} "
+        f"early_stopping_patience={config['early_stopping_patience']}"
+    )
+    print(
+        f"context={config['context_length']}h horizon={config['prediction_length']}h "
+        f"stride={config['stride']} batch_size={config['batch_size']}"
+    )
+    print(
+        f"series={len(series_mapping)} windows={len(dataset):,} "
+        f"future_covariates={len(feature_columns)} [{covariate_names}]"
+    )
+    print(
+        f"device={device} trainable_parameters={trainable_parameters:,} "
+        f"learning_rate={config['learning_rate']}"
+    )
+    print(f"output={output_dir}")
+    print("=" * 72, flush=True)
 
     for epoch in range(1, max_epochs + 1):
         model.train()
@@ -120,7 +170,7 @@ def train(
                 history_features=history_features.to(device),
                 future_features=future_features.to(device),
             )
-            # Match the public "Overall" leaderboard: it percentile-ranks MAE,
+            # Approximate the public "Overall" leaderboard, which percentile-ranks MAE,
             # MSE, RMSE, MAPE, sMAPE, and WAPE equally.  Percentile ranks are not
             # differentiable within one run, so optimize scale-free versions of
             # the same six quantities in the original target scale.
@@ -134,21 +184,27 @@ def train(
             mean_abs_target = raw_target.abs().mean().clamp_min(epsilon)
             mean_square_target = raw_target.square().mean().clamp_min(epsilon)
             rms_target = mean_square_target.sqrt().clamp_min(epsilon)
-            loss_components = torch.stack(
-                [
-                    absolute_error.mean() / mean_abs_target,
-                    squared_error.mean() / mean_square_target,
-                    squared_error.mean().clamp_min(epsilon).sqrt() / rms_target,
-                    (absolute_error / raw_target.abs().clamp_min(epsilon)).mean(),
-                    (
-                        2.0
-                        * absolute_error
-                        / (raw_target.abs() + raw_prediction.abs()).clamp_min(epsilon)
-                    ).mean(),
-                    absolute_error.sum() / raw_target.abs().sum().clamp_min(epsilon),
-                ]
-            )
-            loss = loss_components.mean()
+            wape_loss = absolute_error.sum() / raw_target.abs().sum().clamp_min(epsilon)
+            if config["training_objective"] == "wape":
+                # Electricity contains legitimate zeros, making pointwise MAPE an
+                # unsuitable optimization target. WAPE remains stable at zeros.
+                loss = wape_loss
+            else:
+                loss_components = torch.stack(
+                    [
+                        absolute_error.mean() / mean_abs_target,
+                        squared_error.mean() / mean_square_target,
+                        squared_error.mean().clamp_min(epsilon).sqrt() / rms_target,
+                        (absolute_error / raw_target.abs().clamp_min(epsilon)).mean(),
+                        (
+                            2.0
+                            * absolute_error
+                            / (raw_target.abs() + raw_prediction.abs()).clamp_min(epsilon)
+                        ).mean(),
+                        wape_loss,
+                    ]
+                )
+                loss = loss_components.mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), config["gradient_clip_norm"]
@@ -156,13 +212,23 @@ def train(
             optimizer.step()
             total_loss += loss.item() * len(x)
             total_mae += absolute_error.mean().item() * len(x)
+        train_overall = total_loss / len(dataset)
+        train_mae = total_mae / len(dataset)
         print(
-            f"epoch={epoch:03d} train_overall_proxy="
-            f"{total_loss / len(dataset):.6f} "
-            f"train_mae={total_mae / len(dataset):.6f}"
+            f"epoch={epoch:03d} train_{config['training_objective']}="
+            f"{train_overall:.6f} "
+            f"train_mae={train_mae:.6f}"
         )
+        history_row = {
+            "epoch": epoch,
+            "training_objective": config["training_objective"],
+            "train_loss": train_overall,
+            "train_mae": train_mae,
+        }
 
         if validation is None:
+            history_rows.append(history_row)
+            pd.DataFrame(history_rows).to_csv(output_dir / "history.csv", index=False)
             continue
         history, future, targets = validation
         checkpoint = make_checkpoint(
@@ -194,6 +260,18 @@ def train(
             f"validation_wape_pct={scores['WAPE']:.6f} "
             f"validation_overall_proxy={overall_proxy:.6f}"
         )
+        history_row.update(
+            {
+                "validation_overall_proxy": overall_proxy,
+                "validation_mae": scores["MAE"],
+                "validation_mse": scores["MSE"],
+                "validation_rmse": scores["RMSE"],
+                "validation_mape_pct": scores["MAPE (%)"],
+                "validation_smape_pct": scores["sMAPE (%)"],
+                "validation_wape_pct": scores["WAPE"],
+            }
+        )
+        should_stop = False
         if score < best_score - config["early_stopping_min_delta"]:
             best_score, best_epoch, stale_epochs = score, epoch, 0
             torch.save(checkpoint, checkpoint_path)
@@ -204,7 +282,11 @@ def train(
                     f"Early stopping at epoch {epoch}; best {selection_metric} "
                     f"was {best_score:.6f} at epoch {best_epoch}"
                 )
-                break
+                should_stop = True
+        history_rows.append(history_row)
+        pd.DataFrame(history_rows).to_csv(output_dir / "history.csv", index=False)
+        if should_stop:
+            break
 
     if validation is None:
         torch.save(
@@ -224,20 +306,34 @@ def train(
             targets,
             predictions,
             output_dir / "metrics.json",
-            config["run_name"],
+            f"{model_category(config['dataset'], config['feature_set'])} / "
+            f"{config['run_name']}",
             best_epoch=best_epoch,
+            category=model_category(config["dataset"], config["feature_set"]),
+            name=config["run_name"],
         )
     return checkpoint_path
 
 
-def ensure_local_split() -> None:
+def ensure_local_split(dataset: str, horizon: int) -> None:
     required = [
-        ROOT / "res/dataset/local_train.csv",
-        ROOT / "res/dataset/local_validation_input.csv",
-        ROOT / "res/dataset/local_validation_targets.csv",
+        split_table_path(dataset, horizon, "local_train"),
+        split_table_path(dataset, horizon, "local_validation_input"),
+        split_table_path(dataset, horizon, "local_validation_targets"),
     ]
     if not all(path.exists() for path in required):
-        subprocess.run([sys.executable, str(ROOT / "src/split_data.py")], check=True)
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.datasets.split_data",
+                "--dataset",
+                dataset,
+                "--horizon",
+                str(horizon),
+            ],
+            check=True,
+        )
 
 
 def main() -> None:
@@ -251,27 +347,51 @@ def main() -> None:
     args, overrides = parser.parse_known_args()
     if args.full_training_from:
         config = yaml.safe_load((args.full_training_from / "config.yaml").read_text())
+        config.setdefault("dataset", "operations_forecasting_2026")
+        config.setdefault("feature_set", "provided")
+        config.setdefault("training_objective", "overall")
+        dataset_name = canonical_dataset_name(config["dataset"])
+        feature_set = resolve_feature_set(dataset_name, config["feature_set"])
+        config["dataset"] = dataset_name
+        config["feature_set"] = feature_set
         local_checkpoint = torch.load(
             args.full_training_from / "checkpoint.pt",
             map_location="cpu",
             weights_only=True,
         )
         config["run_name"] = f"{config['run_name']}_full_training"
-        output_dir = ROOT / "output" / config["run_name"]
+        output_dir = model_run_dir(dataset_name, feature_set, config["run_name"])
+        full_train, columns = prepare_features(
+            read_table(base_table_path(dataset_name, "train")),
+            dataset_name,
+            feature_set,
+        )
         train(
             config,
-            pd.read_csv(ROOT / "res/dataset/train.csv"),
+            full_train,
+            feature_columns=columns,
             validation=None,
             output_dir=output_dir,
             epochs=int(local_checkpoint["best_epoch"]),
         )
-        future = pd.read_csv(ROOT / "res/dataset/validation_input.csv")
-        index = pd.read_csv(ROOT / "res/dataset/forecast_index_validation.csv")
+        future_path = base_table_path(dataset_name, "validation_input")
+        index_path = base_table_path(dataset_name, "forecast_index_validation")
+        if not future_path.exists() or not index_path.exists():
+            print(
+                f"Wrote full-training checkpoint to {output_dir}. "
+                f"{dataset_name} has no external validation input/index, so no "
+                "public-validation prediction file was generated."
+            )
+            return
+        future, _ = prepare_features(
+            read_table(future_path), dataset_name, feature_set
+        )
+        index = read_table(index_path)
         checkpoint = torch.load(
             output_dir / "checkpoint.pt", map_location="cpu", weights_only=True
         )
         predictions = forecast(
-            pd.read_csv(ROOT / "res/dataset/train.csv"), index, checkpoint, future
+            full_train, index, checkpoint, future
         )
         predictions.to_csv(
             output_dir
@@ -281,14 +401,35 @@ def main() -> None:
         return
 
     config = load_config(args.config, overrides)
-    ensure_local_split()
-    output_dir = ROOT / "output" / config["run_name"]
-    validation = (
-        pd.read_csv(ROOT / "res/dataset/local_train.csv"),
-        pd.read_csv(ROOT / "res/dataset/local_validation_input.csv"),
-        pd.read_csv(ROOT / "res/dataset/local_validation_targets.csv"),
+    dataset_name = canonical_dataset_name(config["dataset"])
+    feature_set = resolve_feature_set(dataset_name, config["feature_set"])
+    config["dataset"] = dataset_name
+    config["feature_set"] = feature_set
+    horizon = int(config["prediction_length"])
+    ensure_local_split(dataset_name, horizon)
+    output_dir = model_run_dir(dataset_name, feature_set, config["run_name"])
+    local_train, columns = prepare_features(
+        read_table(split_table_path(dataset_name, horizon, "local_train")),
+        dataset_name,
+        feature_set,
     )
-    train(config, validation[0], validation=validation, output_dir=output_dir)
+    local_future, _ = prepare_features(
+        read_table(split_table_path(dataset_name, horizon, "local_validation_input")),
+        dataset_name,
+        feature_set,
+    )
+    validation = (
+        local_train,
+        local_future,
+        read_table(split_table_path(dataset_name, horizon, "local_validation_targets")),
+    )
+    train(
+        config,
+        validation[0],
+        feature_columns=columns,
+        validation=validation,
+        output_dir=output_dir,
+    )
 
 
 if __name__ == "__main__":

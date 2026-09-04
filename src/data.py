@@ -7,34 +7,21 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-FEATURE_COLUMNS = [
-    "hour_sin",
-    "hour_cos",
-    "dow_sin",
-    "dow_cos",
-    "is_weekend",
-    "trend",
-    "workload_intensity",
-    "demand_forecast",
-    "staffing_forecast",
-    "upstream_quality_forecast",
-    "promotion_intensity",
-    "shock_risk",
-    "maintenance_known",
-    "unit_reliability_forecast",
-    "queue_pressure_forecast",
-    "network_pressure_forecast",
-    "event_load_forecast",
-    "service_irregularity_risk_forecast",
-    "throughput_disruption_risk_forecast",
-    "nominal_capacity",
-    "zone_sin",
-    "zone_cos",
-]
+from src.datasets.registry import feature_columns as dataset_feature_columns
+
+# Backward-compatible default for tests and older callers. New training runs pass
+# the selected dataset manifest's columns explicitly.
+FEATURE_COLUMNS = dataset_feature_columns("operations_forecasting_2026", "provided")
 
 
-def validate_frame(frame: pd.DataFrame, *, require_target: bool) -> None:
-    required = {"series_id", "timestamp", *FEATURE_COLUMNS}
+def validate_frame(
+    frame: pd.DataFrame,
+    *,
+    require_target: bool,
+    feature_columns: list[str] | None = None,
+) -> None:
+    columns = FEATURE_COLUMNS if feature_columns is None else feature_columns
+    required = {"series_id", "timestamp", *columns}
     if require_target:
         required.add("target")
     missing = required.difference(frame.columns)
@@ -45,12 +32,15 @@ def validate_frame(frame: pd.DataFrame, *, require_target: bool) -> None:
         raise ValueError(f"Missing values are not allowed in {core}")
 
 
-def fit_preprocessing(frame: pd.DataFrame) -> dict:
-    validate_frame(frame, require_target=True)
-    feature_mean = frame[FEATURE_COLUMNS].mean().fillna(0.0)
-    feature_scale = frame[FEATURE_COLUMNS].std().fillna(1.0).clip(lower=1e-6)
+def fit_preprocessing(
+    frame: pd.DataFrame, feature_columns: list[str] | None = None
+) -> dict:
+    columns = FEATURE_COLUMNS if feature_columns is None else list(feature_columns)
+    validate_frame(frame, require_target=True, feature_columns=columns)
+    feature_mean = frame[columns].mean().fillna(0.0)
+    feature_scale = frame[columns].std().fillna(1.0).clip(lower=1e-6)
     missing_feature_columns = [
-        column for column in FEATURE_COLUMNS if frame[column].isna().any()
+        column for column in columns if frame[column].isna().any()
     ]
     target_statistics = {}
     for series_id, part in frame.groupby("series_id", sort=False):
@@ -61,7 +51,7 @@ def fit_preprocessing(frame: pd.DataFrame) -> dict:
             scale if scale > 1e-6 else 1.0,
         )
     return {
-        "feature_columns": FEATURE_COLUMNS,
+        "feature_columns": columns,
         "feature_mean": feature_mean.to_dict(),
         "feature_scale": feature_scale.to_dict(),
         "missing_feature_columns": missing_feature_columns,
@@ -71,6 +61,8 @@ def fit_preprocessing(frame: pd.DataFrame) -> dict:
 
 def transform_features(frame: pd.DataFrame, preprocessing: dict) -> np.ndarray:
     columns = preprocessing["feature_columns"]
+    if not columns:
+        return np.empty((len(frame), 0), dtype=np.float32)
     values = frame[columns].astype(float)
     mean = pd.Series(preprocessing["feature_mean"])[columns]
     scale = pd.Series(preprocessing["feature_scale"])[columns]
@@ -101,7 +93,11 @@ class WindowDataset(Dataset):
         preprocessing: dict,
         series_mapping: dict[str, int],
     ) -> None:
-        validate_frame(frame, require_target=True)
+        validate_frame(
+            frame,
+            require_target=True,
+            feature_columns=preprocessing["feature_columns"],
+        )
         self.context, self.horizon = context, horizon
         self.series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self.target_means: dict[str, float] = {}

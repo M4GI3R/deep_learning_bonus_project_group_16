@@ -1,10 +1,22 @@
 .venv/
+venv/
 .idea/
 .agents/
 __pycache__/
 *.pyc
+tmp/
 
-# Baseline & Model outputs
+# Large generated model artifacts. Keep lightweight configs, histories, and
+# metrics available for reproducibility and the local dashboard.
+output/**/*.pt
+output/**/*.csv
+!output/**/history.csv
+output/**/*.png
+output/**/*.svg
 
-res/dataset
+# Downloaded/generated datasets are reproducible via src.datasets.import_dataset.
+res/dataset/
+res/datasets/*/raw/
+res/datasets/*/processed/
 submission/checkpoint.pt
+submission/*.zip

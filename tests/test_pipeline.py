@@ -7,20 +7,19 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "submission"))
 
-from config import load_config
-from data import (
+from src.config import load_config
+from src.data import (
     FEATURE_COLUMNS,
     WindowDataset,
     fit_preprocessing,
     transform_features,
     transformed_feature_count,
 )
-from predict import forecast
-from evaluate_predictions import calculate_metrics, calculate_overall_proxy
+from src.evaluate_predictions import calculate_metrics, calculate_overall_proxy
+from src.datasets.registry import prepare_features
 from src.model import build_model
+from src.predict import forecast
 
 
 def frame_for(
@@ -48,6 +47,13 @@ class PipelineTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["WAPE"], 300.0 / 7.0)
         self.assertTrue(np.isfinite(calculate_overall_proxy(y_true, y_pred)))
 
+    def test_mape_excludes_zero_actuals(self):
+        metrics = calculate_metrics(
+            np.array([0.0, 2.0, 4.0]),
+            np.array([100.0, 1.0, 2.0]),
+        )
+        self.assertAlmostEqual(metrics["MAPE (%)"], 50.0)
+
     def test_config_overrides_nested_values(self):
         config = load_config(
             ROOT / "configs/tcn.yaml", ["run_name=test", "model.channels=64"]
@@ -61,6 +67,67 @@ class PipelineTests(unittest.TestCase):
         transformed = transform_features(frame, preprocessing)
         self.assertEqual(transformed.shape, (200, len(FEATURE_COLUMNS) + 1))
         self.assertTrue(np.isfinite(transformed).all())
+
+    def test_electricity_raw_feature_set_is_truly_target_only(self):
+        frame = frame_for(200)[["series_id", "timestamp", "target"]]
+        prepared, columns = prepare_features(frame, "electricity", "raw")
+        preprocessing = fit_preprocessing(prepared, columns)
+        transformed = transform_features(prepared, preprocessing)
+        self.assertEqual(columns, [])
+        self.assertEqual(transformed.shape, (200, 0))
+        dataset = WindowDataset(prepared, 168, 24, 24, preprocessing, {"unit_000": 0})
+        x, _y, series, history_features, future_features, _mean, _scale = dataset[0]
+        common = {
+            "context_length": 168,
+            "prediction_length": 24,
+            "num_features": 0,
+            "num_series": 1,
+            "embedding_size": 2,
+            "dropout": 0.0,
+            "use_series_embedding": True,
+        }
+        dlinear = build_model(
+            {
+                **common,
+                "model": "dlinear",
+                "moving_average": 25,
+                "exogenous_hidden_size": 8,
+            }
+        )
+        tcn = build_model(
+            {
+                **common,
+                "model": "tcn",
+                "channels": 4,
+                "levels": 2,
+                "kernel_size": 3,
+                "residual_period": 24,
+            }
+        )
+        for model in (dlinear, tcn):
+            output = model(
+                x[None],
+                series_index=series[None],
+                history_features=history_features[None],
+                future_features=future_features[None],
+            )
+            self.assertEqual(output.shape, (1, 24))
+
+    def test_electricity_feature_sets_are_cumulative_and_leakage_safe(self):
+        frame = frame_for(48)[["series_id", "timestamp", "target"]]
+        matched, matched_columns = prepare_features(
+            frame, "electricity", "operations_calendar"
+        )
+        extended, extended_columns = prepare_features(
+            frame, "electricity", "calendar_extended"
+        )
+        self.assertEqual(
+            matched_columns,
+            ["hour_sin", "hour_cos", "dow_sin", "dow_cos", "is_weekend", "trend"],
+        )
+        self.assertTrue(set(matched_columns).issubset(extended_columns))
+        self.assertTrue(np.isfinite(matched[matched_columns].to_numpy()).all())
+        self.assertTrue(np.isfinite(extended[extended_columns].to_numpy()).all())
 
     def test_multivariate_window_and_models(self):
         frame = frame_for(520)

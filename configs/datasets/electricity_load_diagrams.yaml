@@ -1,0 +1,36 @@
+name: electricity_load_diagrams
+aliases:
+  - electricity
+  - eld
+source:
+  type: uci_replication_of_huggingface
+  url: https://archive.ics.uci.edu/static/public/321/electricityloaddiagrams20112014.zip
+  huggingface_config: lstnet
+table_format: parquet
+default_feature_set: raw
+feature_sets:
+  raw: []
+  operations_calendar:
+    - hour_sin
+    - hour_cos
+    - dow_sin
+    - dow_cos
+    - is_weekend
+    - trend
+  calendar_extended:
+    - hour_sin
+    - hour_cos
+    - dow_sin
+    - dow_cos
+    - is_weekend
+    - trend
+    - day_of_year_sin
+    - day_of_year_cos
+    - month_sin
+    - month_cos
+    - is_portuguese_holiday
+    - is_dst_transition
+validation_horizon: 336
+trend_origin: 2012-01-01 00:00:00
+trend_periods: 26304
+expected_series: 320

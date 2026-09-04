@@ -1,4 +1,7 @@
-run_name: tcn_direct336
+run_name: tcn
+dataset: operations_forecasting_2026
+feature_set: provided
+training_objective: overall
 seed: 16
 context_length: 168
 prediction_length: 336
